@@ -2,7 +2,17 @@
 
 import os
 import stat
+import sys
 from pathlib import Path, PureWindowsPath
+
+
+def check_macos_volume(path):
+    from Foundation import NSURL, NSURLVolumeIsLocalKey
+
+    url = NSURL.fileURLWithPath_(str(path))
+    found, local, _ = url.getResourceValue_forKey_error_(None, NSURLVolumeIsLocalKey, None)
+    if not found or not local:
+        raise ValueError("Choose a folder on a local volume.")
 
 
 def local_path(value, *, directory=False, missing_leaf=False):
@@ -24,6 +34,7 @@ def local_path(value, *, directory=False, missing_leaf=False):
                 raise ValueError("Unsupported Windows path.")
 
     item = Path(path.anchor)
+    device = item.lstat().st_dev if sys.platform == "darwin" else None
     for name in path.parts[1:]:
         item /= name
         try:
@@ -36,6 +47,9 @@ def local_path(value, *, directory=False, missing_leaf=False):
             getattr(metadata, "st_file_attributes", 0) & 0x400
         ):
             raise ValueError("Symbolic links, junctions and reparse points are unavailable.")
+        if device is not None and device != metadata.st_dev:
+            check_macos_volume(item)
+            device = metadata.st_dev
     metadata = path.lstat()
     expected = stat.S_ISDIR if directory else stat.S_ISREG
     if not expected(metadata.st_mode):

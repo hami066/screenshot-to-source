@@ -10,17 +10,17 @@ from zipfile import ZIP_DEFLATED, ZipFile
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def package(portable, output):
-    shutil.copytree(ROOT / "demo", portable / "demo", dirs_exist_ok=True)
+def copy_notices(portable):
     for name in ("README.md", "SECURITY.md", "LICENSE"):
         shutil.copy2(ROOT / name, portable / name)
-    (portable / "tools").mkdir(exist_ok=True)
-    shutil.copy2(ROOT / "tools" / "New-OfflineDemo.ps1", portable / "tools")
     notices = portable / "third-party-licenses"
-    for package_name in (
+    packages = [
         "numpy", "opencv-python-headless", "Pillow", "tkinterdnd2", "PyInstaller",
         "pypdfium2", "psd-tools", "attrs",
-    ):
+    ]
+    if sys.platform == "darwin":
+        packages.extend(("pyobjc-core", "pyobjc-framework-Cocoa"))
+    for package_name in packages:
         distribution = importlib.metadata.distribution(package_name)
         for file in distribution.files or ():
             if not (
@@ -37,6 +37,13 @@ def package(portable, output):
         for file in path.glob("LICENSE*"):
             if file.is_file():
                 shutil.copy2(file, notices / f"Python-{file.name}")
+
+
+def package(portable, output):
+    shutil.copytree(ROOT / "demo", portable / "demo", dirs_exist_ok=True)
+    (portable / "tools").mkdir(exist_ok=True)
+    shutil.copy2(ROOT / "tools" / "New-OfflineDemo.ps1", portable / "tools")
+    copy_notices(portable)
 
     archive = output / "screenshot-to-source-windows-x64.zip"
     with ZipFile(archive, "w", ZIP_DEFLATED, compresslevel=6) as target:

@@ -1,11 +1,20 @@
 """Windows Shell operations for local files and desktop notices."""
 
 import ctypes
+import subprocess
+import sys
 from ctypes import wintypes
 
 
 def reveal_file(path):
-    """Select an already-validated local file in Explorer without opening it."""
+    """Select an already-validated local file in the system file manager."""
+    if sys.platform == "darwin":
+        try:
+            subprocess.run(["/usr/bin/open", "-R", str(path)], check=True, timeout=5, capture_output=True)
+        except subprocess.SubprocessError as error:
+            raise OSError("Unable to reveal the file in Finder.") from error
+        return
+
     com = ctypes.oledll.ole32
     shell = ctypes.oledll.shell32
     release = ctypes.windll.ole32.CoTaskMemFree

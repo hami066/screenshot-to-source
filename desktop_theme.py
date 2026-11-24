@@ -1,4 +1,4 @@
-"""Local artwork and native widget styles for the two Windows appearances."""
+"""Local artwork and desktop widget styles."""
 
 import ctypes
 import sys
@@ -10,7 +10,7 @@ from tkinter import ttk
 import numpy as np
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageTk
 
-FONT = "Microsoft YaHei UI"
+FONT = "PingFang SC" if sys.platform == "darwin" else "Microsoft YaHei UI"
 BODY = -15
 DETAIL = -14
 SECTION = -18
@@ -18,7 +18,7 @@ TITLE = -30
 BUTTONS = {
     "open": (132, 36), "demo": (92, 36), "paste": (124, 40), "search": (124, 40), "clear": (64, 40),
     "compare": (120, 40), "cancel": (88, 28), "remember": (96, 36), "reveal": (132, 36),
-    "appearance": (148, 36),
+    "appearance": (148, 36), "formats": (188, 30),
 }
 APPEARANCES = {"system": "跟随系统", "light": "浅色", "dark": "深色"}
 PREFERENCES_KEY = r"Software\ScreenshotToSource"
@@ -64,10 +64,17 @@ def enable_windows_dpi():
 
 
 def display_scale(window):
+    if sys.platform == "darwin":
+        return 1.0  # Aqua uses logical points and handles Retina backing pixels.
     return window.winfo_fpixels("1i") / 96
 
 
 def load_appearance():
+    if sys.platform == "darwin":
+        from Foundation import NSUserDefaults
+
+        mode = NSUserDefaults.standardUserDefaults().stringForKey_("Appearance")
+        return mode if mode in APPEARANCES else "system"
     if sys.platform == "win32":
         import winreg
 
@@ -82,6 +89,11 @@ def load_appearance():
 
 
 def save_appearance(mode):
+    if sys.platform == "darwin":
+        from Foundation import NSUserDefaults
+
+        NSUserDefaults.standardUserDefaults().setObject_forKey_(mode, "Appearance")
+        return
     if sys.platform == "win32":
         import winreg
 
@@ -92,7 +104,11 @@ def save_appearance(mode):
             pass
 
 
-def windows_theme():
+def system_theme():
+    if sys.platform == "darwin":
+        from Foundation import NSUserDefaults
+
+        return DARK if NSUserDefaults.standardUserDefaults().stringForKey_("AppleInterfaceStyle") == "Dark" else LIGHT
     if sys.platform == "win32":
         import winreg
 

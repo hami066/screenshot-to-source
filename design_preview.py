@@ -1,10 +1,12 @@
-"""Read saved Photoshop composites and render PDF-compatible design files locally."""
+"""Read local document previews without starting the authoring applications."""
 
 import io
 import math
 import struct
 import threading
+import zlib
 from contextlib import contextmanager
+from zipfile import BadZipFile, ZipFile
 
 import numpy as np
 import pypdfium2 as pdfium
@@ -14,14 +16,60 @@ from psd_tools.psd.image_data import ImageData
 
 PHOTOSHOP_SUFFIXES = {".psd", ".psb"}
 PDF_SUFFIXES = {".pdf", ".ai"}
-DESIGN_SUFFIXES = PHOTOSHOP_SUFFIXES | PDF_SUFFIXES
+OFFICE_ENTRIES = {".docx": "word/document.xml", ".pptx": "ppt/presentation.xml", ".xlsx": "xl/workbook.xml"}
+ARCHIVE_ENTRIES = {
+    ".sketch": ("document.json", ("previews/preview.png",)),
+    ".fig": ("canvas.fig", ("thumbnail.png",)),
+    **{suffix: (entry, tuple(f"docProps/thumbnail.{ext}" for ext in ("jpeg", "jpg", "png")))
+       for suffix, entry in OFFICE_ENTRIES.items()},
+}
+DESIGN_SUFFIXES = PHOTOSHOP_SUFFIXES | PDF_SUFFIXES | {".sketch", ".fig"}
+DOCUMENT_SUFFIXES = DESIGN_SUFFIXES | OFFICE_ENTRIES.keys()
 MAX_PIXELS = 48_000_000
 PSD_COMPOSITE_BYTES = 160 * 1024 * 1024
 PDFIUM_LOCK = threading.RLock()
+ZIP_END = struct.Struct("<4s4H2LH")
+ZIP_DIRECTORY_LIMIT = 16 * 1024 * 1024
+PREVIEW_BYTE_LIMIT = 24 * 1024 * 1024
 
 
 class PreviewUnavailable(ValueError):
     """The file cannot supply a local preview."""
+
+
+def check_archive_directory(stream):
+    # ZipFile loads the central directory at open. Bound it before handing over the stream.
+    size = stream.seek(0, 2)
+    stream.seek(max(0, size - 65535 - ZIP_END.size - 20))
+    tail = stream.read()
+    start = tail.rfind(b"PK\x05\x06")
+    if start < 0 or len(tail) - start < ZIP_END.size:
+        raise PreviewUnavailable("The document has no compatible ZIP directory.")
+    _, disk, directory_disk, entries_on_disk, entries, length, offset, comment = ZIP_END.unpack_from(tail, start)
+    zip64 = start >= 20 and tail[start - 20:start - 16] == b"PK\x06\x07"
+    if (disk or directory_disk or entries != entries_on_disk or entries > 50_000 or zip64
+            or length > ZIP_DIRECTORY_LIMIT or offset + length > size
+            or start + ZIP_END.size + comment != len(tail)):
+        raise PreviewUnavailable("Unsupported ZIP directory size or layout.")
+
+
+@contextmanager
+def embedded_preview(path):
+    document_entry, preview_entries = ARCHIVE_ENTRIES[path.suffix.lower()]
+    try:
+        with path.open("rb") as stream:
+            check_archive_directory(stream)
+            with ZipFile(stream) as archive:
+                archive.getinfo(document_entry)
+                preview = next((archive.NameToInfo[name] for name in preview_entries if name in archive.NameToInfo), None)
+                if preview is None or not (0 < preview.file_size <= PREVIEW_BYTE_LIMIT
+                                           and 0 < preview.compress_size <= PREVIEW_BYTE_LIMIT):
+                    raise PreviewUnavailable("The document has no usable embedded preview.")
+                data = archive.read(preview)
+        with Image.open(io.BytesIO(data), formats=("PNG", "JPEG")) as image:
+            yield image
+    except (BadZipFile, KeyError, RuntimeError, NotImplementedError, EOFError, struct.error, zlib.error) as error:
+        raise PreviewUnavailable("The document has no readable embedded preview.") from error
 
 
 def read_integer(stream, size, *, signed=False):

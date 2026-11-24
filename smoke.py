@@ -28,7 +28,7 @@ def run(root):
 
 def run_file_formats(demo):
     with tempfile.TemporaryDirectory() as temp:
-        root = Path(temp)
+        root = Path(temp).resolve()
         first = read_image(demo / "导出图 A.png")
         second = read_image(demo / "导出图 B.png")
         query_image = read_image(demo / "客户截图.jpg")

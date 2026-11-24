@@ -7,10 +7,11 @@ from tkinter import font as tkfont, ttk
 from PIL import Image, ImageDraw, ImageTk
 from tkinterdnd2 import DND_FILES
 
+from catalog import IMAGE_SUFFIXES, parse_suffixes
 from desktop_notice import CompletionNotice
 from desktop_theme import (
     APPEARANCES, DARK, DETAIL, FONT, LIGHT, SECTION, TITLE, DesktopStyles, icon, load_appearance,
-    paint_backdrop, rounded_surface, save_appearance, style_caption, windows_theme,
+    paint_backdrop, rounded_surface, save_appearance, style_caption, system_theme,
 )
 
 
@@ -121,6 +122,7 @@ class DesktopView(tk.Canvas):
         for name, text, command, glyph in (
             ("open", "选择文件夹…", app.choose_project, "folder"),
             ("demo", "试用样例", app.open_demo, None),
+            ("formats", "", self.open_search_formats, "chevron"),
             ("paste", "粘贴截图", app.paste_query, "clipboard"),
             ("search", "选择截图…", app.choose_query, "picture"),
             ("clear", "清除", app.clear_query, None),
@@ -142,8 +144,8 @@ class DesktopView(tk.Canvas):
             compound="right", style=self.styles.button_style("appearance"),
         )
         self.icons["appearance"] = "chevron"
-        app.buttons["include"] = ttk.Checkbutton(self, variable=app.include_images, style="Filter.TCheckbutton",
-                                                text=" 同时搜索 PNG、JPG 等成品图")
+        app.buttons["formats"].configure(compound="right")
+        self.update_format_button()
         app.progress = ProgressMeter(self, app.progress_value)
         app.rows = {}
         app.tree = ttk.Treeview(self, columns=("match",), show="tree headings", selectmode="browse",
@@ -224,6 +226,97 @@ class DesktopView(tk.Canvas):
         finally:
             self.appearance_menu.grab_release()
 
+    def update_format_button(self):
+        chosen = self.app.active_suffixes
+        labels = [label for _, fields in self.app.format_groups for label, suffixes in fields.items()
+                  if chosen.intersection(suffixes)]
+        labels.extend(sorted(chosen - self.listed_suffixes()))
+        summary = labels[0] if len(labels) == 1 else f"已选 {len(labels)} 项"
+        if len(summary) > 16:
+            summary = summary[:15] + "…"
+        self.app.buttons["formats"].configure(text=f"搜索格式 · {summary}")
+
+    def listed_suffixes(self):
+        return {suffix for _, fields in self.app.format_groups for group in fields.values() for suffix in group}
+
+    def open_search_formats(self):
+        p = self.palette
+        px = self.styles.px
+        dialog = tk.Toplevel(self.app.root)
+        dialog.withdraw()
+        dialog.title("选择搜索格式")
+        dialog.transient(self.app.root)
+        dialog.resizable(False, False)
+        dialog.configure(background=p.sidebar)
+        frame = tk.Frame(dialog, background=p.sidebar, padx=px(20), pady=px(16))
+        frame.pack(fill="both", expand=True)
+        chosen = self.app.active_suffixes
+        options = []
+
+        def label(text, size, color, weight="normal"):
+            content = {"textvariable": text} if isinstance(text, tk.Variable) else {"text": text}
+            tk.Label(frame, background=p.sidebar, foreground=color, font=(FONT, px(size), weight),
+                     anchor="w", **content).pack(fill="x")
+
+        label("只比对你勾选的文件格式", SECTION, p.text, "bold")
+        for heading, fields in self.app.format_groups:
+            label(heading, DETAIL, p.text, "bold")
+            row = tk.Frame(frame, background=p.sidebar)
+            row.pack(fill="x", pady=(px(5), px(15)))
+            for index, (name, suffixes) in enumerate(fields.items()):
+                choice = tk.BooleanVar(dialog, value=bool(chosen.intersection(suffixes)))
+                options.append((choice, suffixes))
+                column, line = index % 3, index // 3
+                row.columnconfigure(column, weight=1, minsize=px(104))
+                ttk.Checkbutton(row, text=f"  {name}", variable=choice, style="Filter.TCheckbutton").grid(
+                    row=line, column=column, sticky="w", pady=px(3))
+        label("其他后缀", DETAIL, p.text, "bold")
+        custom = tk.StringVar(dialog, value=", ".join(sorted(chosen - self.listed_suffixes())))
+        custom_entry = ttk.Entry(frame, textvariable=custom, style="Path.TEntry")
+        custom_entry.pack(fill="x", pady=(px(5), px(2)), ipady=px(4))
+        label("例如 .cdr, .indd。按后缀列出文件。", DETAIL, p.muted)
+        label("文件名或 TXT 内容关键词（可选）", DETAIL, p.text, "bold")
+        keyword = tk.StringVar(dialog, value=self.app.active_keyword)
+        ttk.Entry(frame, textvariable=keyword, style="Path.TEntry").pack(
+            fill="x", pady=(px(5), px(3)), ipady=px(4))
+        label("关键词仅用于 TXT 和其他不支持画面预览的格式。", DETAIL, p.muted)
+        error = tk.StringVar(dialog)
+        label(error, DETAIL, p.text)
+        actions = tk.Frame(frame, background=p.sidebar)
+        actions.pack(fill="x", pady=(px(14), 0))
+
+        def apply():
+            try:
+                additional = parse_suffixes(custom.get())
+            except ValueError as problem:
+                error.set(str(problem))
+                custom_entry.focus_set()
+                return
+            suffixes = {suffix for choice, group in options if choice.get() for suffix in group}
+            self.app.set_search_formats(suffixes | additional, keyword.get())
+            dialog.destroy()
+
+        def action(text, bg, fg, command, side):
+            button = tk.Button(actions, text=text, background=bg, foreground=fg, relief="flat", borderwidth=0,
+                               activebackground=p.hover, activeforeground=p.text, highlightthickness=0,
+                               font=(FONT, px(DETAIL)), padx=px(12), pady=px(6), command=command)
+            button.pack(side=side, padx=(0, px(6)))
+            return button
+
+        action("取消", p.panel, p.text, dialog.destroy, "right")
+        confirm = action("应用", p.primary, "#ffffff", apply, "right")
+        dialog.bind("<Escape>", lambda _: dialog.destroy())
+        dialog.bind("<Return>", lambda _: apply())
+        dialog.update_idletasks()
+        root = self.app.root
+        x = max(0, root.winfo_rootx() + (root.winfo_width() - dialog.winfo_reqwidth()) // 2)
+        y = max(0, root.winfo_rooty() + (root.winfo_height() - dialog.winfo_reqheight()) // 2)
+        dialog.geometry(f"+{x}+{y}")
+        dialog.deiconify()
+        dialog.wait_visibility()
+        dialog.grab_set()
+        confirm.focus_set()
+
     def select_appearance(self):
         save_appearance(self.appearance.get())
         self.app.buttons["appearance"].configure(text=self.appearance_label())
@@ -231,7 +324,7 @@ class DesktopView(tk.Canvas):
 
     def refresh_theme(self):
         mode = self.appearance.get()
-        palette = windows_theme() if mode == "system" else DARK if mode == "dark" else LIGHT
+        palette = system_theme() if mode == "system" else DARK if mode == "dark" else LIGHT
         if palette != self.palette:
             self.apply_theme(palette)
 
@@ -264,7 +357,7 @@ class DesktopView(tk.Canvas):
     def file_icon(self, path):
         suffix = path.suffix.lower()
         formats = {".psd": "ps", ".psb": "ps", ".ai": "ai", ".pdf": "pdf", ".svg": "file"}
-        return self.file_icons[formats.get(suffix, "raster")]
+        return self.file_icons[formats.get(suffix, "raster" if suffix in IMAGE_SUFFIXES else "file")]
 
     def photo(self, name, image):
         photo = ImageTk.PhotoImage(image, master=self)
@@ -306,7 +399,7 @@ class DesktopView(tk.Canvas):
         self.coords("scope", margin, px(150))
         self.fit_label("scope", self.app.project_line.get(), sidebar - 2 * margin)
         self.place_buttons(background, ("open", "demo"), margin, px(176), gap=px(8))
-        self.app.buttons["include"].place(x=margin, y=px(220), height=px(28))
+        self.place_buttons(background, ("formats",), margin, px(220), gap=0)
         self.coords("sidebar-rule", margin, px(264), sidebar - margin, px(264))
         self.coords("results", margin, px(284))
         self.coords("summary", margin, px(314))

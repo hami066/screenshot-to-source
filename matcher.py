@@ -11,12 +11,13 @@ from PIL import Image, ImageOps
 
 from catalog import IMAGE_BYTE_LIMIT
 from design_preview import (
-    MAX_PIXELS, PDF_SUFFIXES, PHOTOSHOP_SUFFIXES, PreviewUnavailable, pdf_document,
+    ARCHIVE_ENTRIES, MAX_PIXELS, PDF_SUFFIXES, PHOTOSHOP_SUFFIXES, PreviewUnavailable,
+    embedded_preview, pdf_document,
     photoshop_preview, render_pdf_page,
 )
 from local_paths import local_path
 
-IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "BMP")
+IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "TIFF", "GIF", "BMP")
 
 cv2.setNumThreads(2)
 
@@ -46,6 +47,9 @@ def read_reference(path, page=None):
     suffix = path.suffix.lower()
     if suffix in PHOTOSHOP_SUFFIXES:
         return photoshop_preview(path)
+    if suffix in ARCHIVE_ENTRIES:
+        with embedded_preview(path) as image:
+            return normalize_image(image)
     if suffix in PDF_SUFFIXES:
         with pdf_document(path) as document:
             if page is None or not 0 <= page < len(document):

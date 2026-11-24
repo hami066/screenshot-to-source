@@ -10,6 +10,11 @@ from windows_shell import show_corner_window
 
 
 def play_completion_sound():
+    if sys.platform == "darwin":
+        from AppKit import NSBeep
+
+        NSBeep()
+        return
     if sys.platform != "win32":
         return
     import winsound

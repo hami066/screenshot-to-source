@@ -1,8 +1,10 @@
 """Project records. No screenshot, thumbnail or image descriptors are stored."""
 
 import os
+import re
 import sqlite3
 import stat
+import unicodedata
 from contextlib import closing
 from dataclasses import dataclass
 from hashlib import file_digest
@@ -11,8 +13,43 @@ from pathlib import Path
 from local_paths import local_path, project_file
 
 CATALOG_NAME = "screenshot-source.sqlite3"
-IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".jfif", ".webp", ".bmp"}
+IMAGE_TYPES = {
+    "PNG": (".png",), "JPEG": (".jpg", ".jpeg", ".jfif"), "WebP": (".webp",),
+    "TIFF": (".tif", ".tiff"), "GIF": (".gif",), "BMP": (".bmp",),
+}
+IMAGE_SUFFIXES = {suffix for suffixes in IMAGE_TYPES.values() for suffix in suffixes}
 IMAGE_BYTE_LIMIT = 96 * 1024 * 1024
+TEXT_BYTES = 4 * 1024 * 1024
+
+
+def parse_suffixes(value):
+    tokens = re.split(r"[\s,，、;；]+", value.strip())
+    if any(not re.fullmatch(r"\.?[\w+-]+", token) for token in tokens if token):
+        raise ValueError("请输入单个文件后缀，用空格或逗号分隔，例如 .cdr, .indd。")
+    return {"." + token.lstrip(".").lower() for token in tokens if token}
+
+
+def text_key(value):
+    return unicodedata.normalize("NFKC", value).casefold()
+
+
+def matches_keyword(path, keyword):
+    if not keyword or keyword in text_key(path.name):
+        return True
+    if path.suffix.lower() != ".txt":
+        return False
+    with path.open("rb") as stream:
+        content = stream.read(TEXT_BYTES + 1)
+    if len(content) > TEXT_BYTES:
+        raise ValueError("TXT exceeds the 4 MiB content limit.")
+    if content.startswith((b"\xff\xfe", b"\xfe\xff")):
+        decoded = content.decode("utf-16")
+    else:
+        try:
+            decoded = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            decoded = content.decode("gb18030")
+    return keyword in text_key(decoded)
 
 
 def fingerprint(path):

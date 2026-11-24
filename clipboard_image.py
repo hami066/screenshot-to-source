@@ -1,4 +1,4 @@
-"""Read image bytes from the Windows clipboard on explicit paste."""
+"""Read image bytes from the desktop clipboard on explicit paste."""
 
 import ctypes
 import io
@@ -79,10 +79,32 @@ class WindowsClipboard:
             self.close()
 
 
+def macos_payloads():
+    from AppKit import NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeTIFF
+
+    board = NSPasteboard.generalPasteboard()
+    oversized = False
+    for flavor, decoder in ((NSPasteboardTypePNG, "PNG"), (NSPasteboardTypeTIFF, "TIFF"), ("public.jpeg", "JPEG")):
+        data = board.dataForType_(flavor)
+        if data is None:
+            continue
+        size = data.length()
+        oversized = oversized or size > IMAGE_BYTE_LIMIT
+        if 0 < size <= IMAGE_BYTE_LIMIT:
+            yield decoder, bytes(data)
+    if oversized:
+        raise ClipboardImageError("剪贴板图片太大，请重新截取所需区域。")
+    if board.availableTypeFromArray_([NSPasteboardTypeFileURL]):
+        raise ClipboardImageError("剪贴板里是文件。请把图片文件拖进来，或点「选择截图」。")
+
+
 def read_clipboard_image():
-    if sys.platform != "win32":
-        raise ClipboardImageError("剪贴板粘贴支持 Windows。也可以拖入图片文件。")
-    payloads = WindowsClipboard().image_payloads()
+    if sys.platform == "win32":
+        payloads = WindowsClipboard().image_payloads()
+    elif sys.platform == "darwin":
+        payloads = macos_payloads()
+    else:
+        raise ClipboardImageError("可以把图片文件拖进来，或点「选择截图」。")
     unusable_data = False
     try:
         for decoder, payload in payloads:
@@ -97,4 +119,4 @@ def read_clipboard_image():
         payloads.close()
     if unusable_data:
         raise ClipboardImageError("这张截图太大或格式无法读取。请重新截取所需区域。")
-    raise ClipboardImageError("剪贴板里没有图像。请重新截图或用「复制图片」，再按 Ctrl+V。")
+    raise ClipboardImageError("剪贴板里没有图像。请重新截图或用「复制图片」，再粘贴。")

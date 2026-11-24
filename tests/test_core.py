@@ -1,16 +1,20 @@
 import shutil
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
+from threading import Event
 from unittest.mock import patch
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from PIL import Image, ImageDraw
 
-from catalog import CATALOG_NAME, IMAGE_SUFFIXES, Catalog, scan_exports
-from design_preview import DESIGN_SUFFIXES
+from app import DEFAULT_SUFFIXES, App
+from catalog import CATALOG_NAME, IMAGE_SUFFIXES, Catalog, parse_suffixes, scan_exports
+from design_preview import ARCHIVE_ENTRIES, DESIGN_SUFFIXES, PreviewUnavailable
 from desktop_theme import header_mask
 from local_paths import local_path, project_file
-from matcher import Matcher, read_image
+from matcher import Matcher, read_image, read_reference
 from smoke import run, run_file_formats
 
 DEMO = Path(__file__).resolve().parent.parent / "demo"
@@ -31,7 +35,7 @@ class DesktopCoreTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.root = Path(directory.name)
+        self.root = Path(directory.name).resolve()
         self.export = self.root / "导出图 B.png"
         self.source = self.root / "可编辑原稿 B.svg"
         shutil.copyfile(DEMO / self.export.name, self.export)
@@ -44,15 +48,72 @@ class DesktopCoreTests(unittest.TestCase):
         run_file_formats(DEMO)
 
     def test_design_scan_defaults_and_optional_exports(self):
-        for suffix in (".psd", ".psb", ".ai", ".pdf"):
-            (self.root / ("设计稿" + suffix)).touch()
+        nested = self.root / "子文件夹"
+        nested.mkdir()
+        for suffix in (*DESIGN_SUFFIXES, ".pptx", ".tst"):
+            (nested / ("设计稿" + suffix.upper())).touch()
         args = (self.root, set(), lambda: False, lambda _: None)
-        found, skipped = scan_exports(*args, suffixes=DESIGN_SUFFIXES)
-        self.assertEqual({Path(name).suffix for name in found}, DESIGN_SUFFIXES)
+        found, skipped = scan_exports(*args, suffixes=DEFAULT_SUFFIXES)
+        self.assertEqual({Path(name).suffix.lower() for name in found}, DEFAULT_SUFFIXES)
         self.assertEqual(skipped, 0)
-        combined, _ = scan_exports(*args, suffixes=DESIGN_SUFFIXES | IMAGE_SUFFIXES, prioritize=DESIGN_SUFFIXES)
+        combined, _ = scan_exports(*args, suffixes=DEFAULT_SUFFIXES | IMAGE_SUFFIXES, prioritize=DESIGN_SUFFIXES)
         self.assertEqual(combined[:-1], found)
         self.assertEqual(combined[-1], self.export.name)
+        selected, _ = scan_exports(*args, suffixes={".psd", ".pptx"})
+        self.assertEqual({Path(name).suffix.lower() for name in selected}, {".psd", ".pptx"})
+
+    def test_archived_document_previews_find_sources_and_skip_missing_previews(self):
+        screenshot = read_image(DEMO / "客户截图.jpg")
+        artwork = read_image(self.export)
+        with BytesIO() as stream:
+            artwork.save(stream, format="PNG")
+            preview = stream.getvalue()
+        for suffix, (document, alternatives) in ARCHIVE_ENTRIES.items():
+            path = self.root / f"设计稿{suffix}"
+            with ZipFile(path, "w", ZIP_DEFLATED) as archive:
+                archive.writestr(document, b"test fixture")
+                preview_path = alternatives[-1]
+                archive.writestr(preview_path, preview)
+        with ZipFile(self.root / "无封面.fig", "w") as archive:
+            archive.writestr("canvas.fig", b"test fixture")
+        (self.root / "损坏.fig").write_bytes(b"invalid ZIP data")
+        events = {}
+        App.compare_files(events.__setitem__, Event(), self.root, {}, Matcher(), screenshot, set(), ARCHIVE_ENTRIES.keys())
+        matches, compared, skipped, total, suffix_count = events["results"]
+        self.assertEqual({Path(record.export).suffix for record, _ in matches}, ARCHIVE_ENTRIES.keys())
+        self.assertEqual((compared, skipped, total, suffix_count), (5, 2, 7, 0))
+        self.assertEqual(read_reference(self.root / "设计稿.fig").tobytes(), artwork.tobytes())
+        with self.assertRaises(PreviewUnavailable):
+            read_reference(self.root / "无封面.fig")
+
+    def test_tiff_and_gif_decode_the_first_image(self):
+        for extension in ("tif", "gif"):
+            path = self.root / f"序列.{extension}"
+            first = Image.new("RGB", (64, 64), "blue")
+            first.save(path, save_all=True, append_images=[Image.new("RGB", first.size, "red")])
+            self.assertEqual(read_image(path).getpixel((10, 10)), (0, 0, 255))
+
+    def test_custom_suffixes_list_files_and_txt_can_search_content(self):
+        (self.root / "备忘录.TXT").write_text("项目代号 Horizon", encoding="utf-16")
+        (self.root / "会议记录.txt").write_text("请确认测试文稿", encoding="gb18030")
+        (self.root / "Horizon 设计.CDR").write_bytes(b"no preview needed")
+        (self.root / "另一个设计.CDR").touch()
+        suffixes = parse_suffixes("TXT，.cdr .txt")
+        self.assertEqual(suffixes, {".txt", ".cdr"})
+        with self.assertRaises(ValueError):
+            parse_suffixes("C:/folder/example.txt")
+
+        def search(keyword):
+            events = {}
+            App.compare_files(events.__setitem__, Event(), self.root, {}, None, None, set(), suffixes, keyword)
+            matches, compared, skipped, total, suffix_count = events["results"]
+            self.assertEqual((compared, skipped, total, suffix_count), (0, 0, 4, len(matches)))
+            self.assertTrue(all(evidence is None for _, evidence in matches))
+            return {record.export for record, _ in matches}
+
+        self.assertEqual(search("horizon"), {"备忘录.TXT", "Horizon 设计.CDR"})
+        self.assertEqual(search("测试"), {"会议记录.txt"})
+        self.assertEqual(len(search("")), 4)
 
     def test_shared_crop_preserves_multiple_candidates(self):
         version = read_image(self.export)

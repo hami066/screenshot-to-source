@@ -11,18 +11,28 @@ from tkinter import filedialog, messagebox, simpledialog
 from PIL import Image, ImageDraw, ImageOps, ImageTk
 from tkinterdnd2 import TkinterDnD
 
-from catalog import IMAGE_SUFFIXES, Catalog, Record, scan_exports
+from catalog import IMAGE_SUFFIXES, IMAGE_TYPES, Catalog, Record, matches_keyword, scan_exports, text_key
 from clipboard_image import ClipboardImageError, read_clipboard_image
 from desktop_theme import BODY, DETAIL, FONT, display_scale, enable_windows_dpi, icon
 from desktop_view import DesktopView
-from design_preview import DESIGN_SUFFIXES, PHOTOSHOP_SUFFIXES
+from design_preview import ARCHIVE_ENTRIES, DOCUMENT_SUFFIXES, PHOTOSHOP_SUFFIXES
 from local_paths import project_file
 from matcher import Matcher, normalize_image, read_image, read_reference
 from windows_shell import reveal_file
 
-APP_DIR = Path(sys.executable if getattr(sys, "frozen", False) else __file__).parent
-IMAGE_PICKER = [("图片", "*.png *.jpg *.jpeg *.jfif *.webp *.bmp")]
-ORIGINAL_SUFFIXES = PHOTOSHOP_SUFFIXES | {".ai"}
+APP_DIR = Path(sys.executable if getattr(sys, "frozen", False) and sys.platform == "win32" else __file__).resolve().parent
+DEMO_DIR = (APP_DIR / "demo").resolve()
+IMAGE_PICKER = [("图片", " ".join(f"*{suffix}" for suffix in sorted(IMAGE_SUFFIXES)))]
+ORIGINAL_SUFFIXES = DOCUMENT_SUFFIXES - {".pdf"}
+PREVIEW_SUFFIXES = DOCUMENT_SUFFIXES | IMAGE_SUFFIXES
+DEFAULT_SUFFIXES = frozenset({".psd", ".psb", ".ai", ".pdf"})
+FORMAT_GROUPS = (
+    ("设计原稿", {"PSD": (".psd",), "PSB": (".psb",), "AI": (".ai",), "Sketch": (".sketch",), "Figma": (".fig",)}),
+    ("办公文件", {"PDF": (".pdf",), "PPTX": (".pptx",), "DOCX": (".docx",), "XLSX": (".xlsx",), "TXT": (".txt",)}),
+    ("图片", IMAGE_TYPES),
+)
+PASTE_SHORTCUT = "⌘ V" if sys.platform == "darwin" else "Ctrl+V"
+SUFFIX_RESULT_LIMIT = 500
 DISPLAY_IMAGE_EDGE = 2400
 
 
@@ -83,7 +93,8 @@ class Preview(tk.Canvas):
         self.create_image(x, y - px(30), image=self.empty_icon)
         self.create_text(x, y, text=self.hint, fill=palette.muted, font=(FONT, px(BODY)))
         if self.query:
-            for label, start, end in (("Ctrl", -36, 2), ("V", 10, 36)):
+            modifier = "⌘" if sys.platform == "darwin" else "Ctrl"
+            for label, start, end in ((modifier, -36, 2), ("V", 10, 36)):
                 left, right = x + px(start), x + px(end)
                 self.create_rectangle(left, y + px(21), right, y + px(43), fill=palette.panel, outline=palette.panel_edge)
                 self.create_text((left + right) / 2, y + px(32), text=label, fill=palette.muted,
@@ -102,7 +113,10 @@ class App:
         self.query_image = self.query_path = None
         self.comparing = False
         self.is_demo = False
-        self.include_images = tk.BooleanVar(value=False)
+        self.search_suffixes = DEFAULT_SUFFIXES
+        self.demo_suffixes = frozenset({".png"})
+        self.file_keyword = self.demo_keyword = ""
+        self.format_groups = FORMAT_GROUPS
         self.project_line = tk.StringVar(value="尚未选择文件夹")
         self.status = tk.StringVar(value="粘贴截图后，点击「开始对比」")
         self.progress_value = tk.IntVar(value=0)
@@ -114,7 +128,8 @@ class App:
         self.selected_location = None
         self.buttons = {}
         self.setup()
-        for shortcut in ("<Control-KeyPress-v>", "<Control-KeyPress-V>"):
+        modifier = "Command" if sys.platform == "darwin" else "Control"
+        for shortcut in (f"<{modifier}-KeyPress-v>", f"<{modifier}-KeyPress-V>"):
             root.bind_class("ScreenshotPaste", shortcut, self.paste_query)
         self.bind_paste(root)
         threading.Thread(target=self.run_searches, daemon=True).start()
@@ -146,11 +161,13 @@ class App:
                 enabled = self.comparing
             if name == "remember":
                 record = self.selected_record()
-                enabled = enabled and not self.is_demo and record is not None and Path(record.export).suffix.lower() not in ORIGINAL_SUFFIXES
+                enabled = (enabled and not self.is_demo and record is not None
+                           and Path(record.export).suffix.lower() in IMAGE_SUFFIXES | {".pdf"})
             if name == "reveal":
-                enabled = enabled and sys.platform == "win32" and self.selected_location is not None
+                enabled = enabled and sys.platform in ("win32", "darwin") and self.selected_location is not None
             button.state(["!disabled"] if enabled else ["disabled"])
-        compare_label = "正在对比…" if self.comparing else "正在读取截图…" if self.busy else "开始对比"
+        start_label = "开始查找" if self.query_image is None and self.active_suffixes - PREVIEW_SUFFIXES else "开始对比"
+        compare_label = "正在查找…" if self.comparing else "正在读取截图…" if self.busy else start_label
         self.buttons["compare"].configure(text=compare_label)
         paste_label = "更换截图" if self.query_preview.image is not None else "粘贴截图"
         self.buttons["paste"].configure(text=paste_label)
@@ -168,16 +185,18 @@ class App:
         except (OSError, ValueError, sqlite3.Error):
             self.warn("无法打开搜索文件夹。请选择本机磁盘上的目录，并确认它和已有记录可读。")
             return False
-        if demo or self.is_demo:
-            self.include_images.set(demo)
+        if demo:
+            self.demo_suffixes = frozenset({".png"})
+            self.demo_keyword = ""
         self.catalog, self.matcher, self.is_demo = catalog, Matcher(), demo
+        self.view.update_format_button()
         self.project_line.set("内置样例" if demo else f"{catalog.root}（含子文件夹）")
         self.reset_results()
         self.show_ready_status()
         return True
 
     def open_demo(self):
-        if not self.open_project(APP_DIR / "demo", demo=True):
+        if not self.open_project(DEMO_DIR, demo=True):
             return
         try:
             for version in ("A", "B", "C"):
@@ -216,6 +235,9 @@ class App:
         self.status.set("已记住原稿。下次找到这张成品图时，会直接显示原稿位置。")
 
     def show_ready_status(self):
+        if self.active_suffixes - PREVIEW_SUFFIXES and self.query_image is None:
+            self.status.set("可直接按后缀查找。粘贴截图后也能比对已勾选的图片或文档。")
+            return
         if self.query_image is not None:
             next_step = "点击「开始对比」。" if self.catalog else "点击「开始对比」并选择搜索文件夹。"
             self.status.set("截图已就绪。" + next_step)
@@ -223,6 +245,29 @@ class App:
             self.status.set("搜索范围已选好。请粘贴截图，再点击「开始对比」。")
         else:
             self.status.set("先粘贴截图，再点「开始对比」。")
+
+    @property
+    def active_suffixes(self):
+        return self.demo_suffixes if self.is_demo else self.search_suffixes
+
+    @property
+    def active_keyword(self):
+        return self.demo_keyword if self.is_demo else self.file_keyword
+
+    def set_search_formats(self, suffixes, keyword=""):
+        chosen = frozenset(suffixes)
+        keyword = keyword.strip()
+        if (chosen, keyword) == (self.active_suffixes, self.active_keyword):
+            return
+        if self.is_demo:
+            self.demo_suffixes = chosen
+            self.demo_keyword = keyword
+        else:
+            self.search_suffixes = chosen
+            self.file_keyword = keyword
+        self.view.update_format_button()
+        self.reset_results()
+        self.show_ready_status()
 
     def reset_results(self):
         self.results = {}
@@ -254,11 +299,14 @@ class App:
         self.rows.clear()
         self.reset_location()
         self.evidence_line.set("")
+        self.match_preview.hint = "对比后显示匹配画面"
         self.match_preview.set()
         for record in records:
             evidence = self.results[record.export]
-            status = "整图一致" if evidence.exact else "局部匹配"
-            if evidence.page is not None:
+            status = "关键词符合" if self.active_keyword else "后缀符合"
+            if evidence is not None:
+                status = "整图一致" if evidence.exact else "局部匹配"
+            if evidence is not None and evidence.page is not None:
                 status = f"第 {evidence.page + 1} 页"
             path = Path(record.export)
             row = self.tree.insert("", "end", text=path.name, image=self.view.file_icon(path), values=(status,))
@@ -276,19 +324,29 @@ class App:
         evidence = self.results[record.export]
         try:
             export, source = self.catalog.paths(record)
-            image = read_reference(export, evidence.page)
+            image = read_reference(export, evidence.page) if evidence is not None else None
         except (OSError, ValueError, Image.DecompressionBombError):
             self.evidence_line.set("该文件的预览已不可读，请检查文件位置和权限。")
             return
+        suffix = export.suffix.lower()
+        self.selected_location = "source" if source else "export"
+        self.location_path.set(str(source or export))
+        if evidence is None:
+            self.location_label.set("文件位置")
+            self.evidence_line.set("匹配方式 · 后缀及关键词" if self.active_keyword else "匹配方式 · 文件后缀")
+            self.match_preview.hint = "此结果按文件后缀找到"
+            self.match_preview.paint()
+            self.sync_buttons()
+            return
+        self.match_preview.hint = "对比后显示匹配画面"
         self.match_preview.set(image, evidence.box if not evidence.exact else None)
         detail = "整图像素一致" if evidence.exact else "黄色框标出了截图对应的位置"
-        suffix = export.suffix.lower()
         if evidence.page is not None:
             detail += f" · 第 {evidence.page + 1} 页"
         elif suffix in PHOTOSHOP_SUFFIXES:
-            detail += " · PSD 保存时的合成画面"
-        self.selected_location = "source" if source else "export"
-        self.location_path.set(str(source or export))
+            detail += " · Photoshop 保存时的合成画面"
+        elif suffix in ARCHIVE_ENTRIES:
+            detail += " · 文件内嵌缩略图"
         kind = "原稿" if source or suffix in ORIGINAL_SUFFIXES else "PDF" if suffix == ".pdf" else "成品图"
         self.location_label.set(f"{kind}位置")
         if source:
@@ -352,27 +410,36 @@ class App:
     def start_compare(self):
         if self.busy:
             return
-        if self.query_image is None:
-            self.status.set("请先按 Ctrl+V 粘贴截图，或从文件选择截图。")
+        if self.query_image is None and self.active_suffixes and not self.active_suffixes - PREVIEW_SUFFIXES:
+            self.status.set(f"请先按 {PASTE_SHORTCUT} 粘贴截图，或从文件选择截图。")
             return
         if self.catalog is None:
             self.status.set("请在弹出的窗口里选择要搜索的文件夹。")
             if not self.choose_project():
                 self.status.set("还未选择搜索文件夹。点击「开始对比」可以重新选择。")
                 return
+        suffixes = self.active_suffixes
+        if not suffixes:
+            self.status.set("请在左侧「搜索格式」里勾选至少一种文件格式。")
+            self.buttons["formats"].focus_set()
+            return
+        if self.query_image is None:
+            suffixes = suffixes - PREVIEW_SUFFIXES
+            if not suffixes:
+                self.status.set(f"请先按 {PASTE_SHORTCUT} 粘贴截图，或从文件选择截图。")
+                return
         excluded = {self.query_path}
         if self.is_demo:
             excluded.add(self.catalog.root / "客户截图.jpg")
         self.comparing = True
-        suffixes = DESIGN_SUFFIXES | IMAGE_SUFFIXES if self.include_images.get() else DESIGN_SUFFIXES
         self.queue_job(self.compare_files, self.catalog.root, self.catalog.records.copy(),
-                       self.matcher, self.query_image, excluded, suffixes)
+                       self.matcher, self.query_image, excluded, suffixes, self.active_keyword)
         self.reset_results()
         self.progress.set_mode("indeterminate")
         self.progress.start(32)
         self.progress_text.set("正在扫描文件夹…")
-        self.result_summary.set("正在查找，完成后显示候选图片。")
-        self.status.set("已开始对比。正在扫描文件夹和子文件夹里的图片…")
+        self.result_summary.set("正在查找，完成后显示候选文件。")
+        self.status.set("已开始对比。正在扫描文件夹和子文件夹中所选格式的文件…")
 
     def queue_job(self, operation, *arguments):
         self.invalidate_search()
@@ -416,34 +483,41 @@ class App:
             report("loaded", (screenshot, preview, path))
 
     @staticmethod
-    def compare_files(report, cancel, root, saved, matcher, screenshot, excluded, suffixes):
+    def compare_files(report, cancel, root, saved, matcher, screenshot, excluded, suffixes, keyword=""):
         exports, inaccessible = scan_exports(
             root, excluded, cancel.is_set,
             lambda count: report("scanning", count),
-            suffixes=suffixes, prioritize=DESIGN_SUFFIXES,
+            suffixes=suffixes, prioritize=DOCUMENT_SUFFIXES,
         )
         if cancel.is_set():
             return
-        matches, compared = [], 0
+        matches, by_suffix = [], []
+        compared = suffix_count = 0
         total = len(exports)
         if total:
             report("progress", (0, total, 0))
-            query = matcher.query(screenshot)
+            query = matcher.query(screenshot) if screenshot is not None and suffixes & PREVIEW_SUFFIXES else None
+            keyword = text_key(keyword)
             for index, relative in enumerate(exports, 1):
                 if cancel.is_set():
                     return
                 try:
                     path = project_file(root, relative)
-                    evidence = matcher.match(query, path, cancelled=cancel.is_set)
-                    compared += 1
-                    if evidence:
-                        matches.append((saved.get(relative) or Record(relative), evidence))
+                    if path.suffix.lower() in PREVIEW_SUFFIXES:
+                        evidence = matcher.match(query, path, cancelled=cancel.is_set)
+                        compared += 1
+                        if evidence:
+                            matches.append((saved.get(relative) or Record(relative), evidence))
+                    elif matches_keyword(path, keyword):
+                        suffix_count += 1
+                        if len(by_suffix) < SUFFIX_RESULT_LIMIT:
+                            by_suffix.append((Record(relative), None))
                 except (OSError, ValueError, Image.DecompressionBombError):
                     inaccessible += 1
                 if total <= 100 or index % 4 == 0 or index == total:
-                    report("progress", (index, total, len(matches)))
+                    report("progress", (index, total, len(matches) + suffix_count))
         matches.sort(key=lambda pair: (not pair[1].exact, -pair[1].inliers, -pair[1].ratio, pair[0].export))
-        report("results", (matches, compared, inaccessible, total))
+        report("results", (matches + by_suffix, compared, inaccessible, total, suffix_count))
 
     def cancel_compare(self):
         self.invalidate_search()
@@ -485,7 +559,7 @@ class App:
                     self.query_preview.set(preview)
                     self.show_ready_status()
                 elif event == "results":
-                    matches, compared, inaccessible, total = value
+                    matches, compared, inaccessible, total, suffix_count = value
                     self.progress.stop()
                     self.update_progress(total, total)
                     self.results = {record.export: evidence for record, evidence in matches}
@@ -494,13 +568,21 @@ class App:
                     if first:
                         self.tree.selection_set(first)
                         self.select()
-                    self.result_summary.set(f"已比对 {compared} 份 · {len(matches)} 个候选")
+                    visual_count = len(matches) - min(suffix_count, SUFFIX_RESULT_LIMIT)
+                    self.result_summary.set(f"截图匹配 {visual_count} · 后缀查找 {suffix_count}" if suffix_count else
+                                            f"已比对 {compared} 份 · {visual_count} 个候选")
                     summary = f"对比完成，找到 {len(matches)} 个候选。请查看右侧对照。" if matches else (
-                        "对比完成，没找到相似图片。可尝试换一张更完整的截图。" if compared else
-                        "没有可比对的设计稿。只有 PNG、JPG 等成品图时，请勾选「也查成品图」再试。"
+                        "对比完成，没找到相似文件。可尝试换一张更完整的截图。" if compared else
+                        "没有符合关键词的文件。可以缩短关键词或清空关键词后再找。" if total and not inaccessible else
+                        "所选文件无法比对。请确认文件可读且有可用预览。" if total else
+                        "这个文件夹里没有所选格式的文件。可以更改左侧「搜索格式」。"
                     )
+                    if suffix_count:
+                        summary = f"查找完成，截图匹配 {visual_count} 项，按后缀或关键词找到 {suffix_count} 项。"
+                        if suffix_count > SUFFIX_RESULT_LIMIT:
+                            summary += f"后缀结果显示前 {SUFFIX_RESULT_LIMIT} 项。"
                     self.status.set(summary + (f" 有 {inaccessible} 项无法读取或无兼容预览。" if inaccessible else ""))
-                    self.view.notice.show(len(matches), self.view.palette)
+                    self.view.notice.show(visual_count + suffix_count, self.view.palette)
                 else:
                     if was_comparing:
                         self.progress.stop()
@@ -526,8 +608,8 @@ def main():
 
         from smoke import run, run_file_formats
 
-        run(APP_DIR / "demo")
-        run_file_formats(APP_DIR / "demo")
+        run(DEMO_DIR)
+        run_file_formats(DEMO_DIR)
         root = TkinterDnD.Tk()
         root.withdraw()
         try:
@@ -540,7 +622,7 @@ def main():
                 assert not app.busy, "The desktop operation timed out."
 
             assert app.buttons["paste"].instate(("!disabled",))
-            app.load_query(read_image(APP_DIR / "demo" / "客户截图.jpg"))
+            app.load_query(read_image(DEMO_DIR / "客户截图.jpg"))
             wait_for_idle()
             assert app.catalog is None and app.query_image is not None
             assert app.query_preview.image is not None
@@ -548,7 +630,7 @@ def main():
             app.choose_project = lambda: False
             app.buttons["compare"].invoke()
             assert app.catalog is None and "还未选择搜索文件夹" in app.status.get()
-            app.choose_project = lambda: app.open_project(APP_DIR / "demo", demo=True)
+            app.choose_project = lambda: app.open_project(DEMO_DIR, demo=True)
             app.buttons["compare"].invoke()
             assert app.comparing and app.progress.mode == "indeterminate"
             wait_for_idle()
@@ -558,6 +640,15 @@ def main():
             app.open_demo()
             wait_for_idle()
             assert not app.rows and "开始对比" in app.status.get()
+            assert app.search_suffixes == DEFAULT_SUFFIXES and app.active_suffixes == {".png"}
+            app.set_search_formats([])
+            app.buttons["compare"].invoke()
+            assert not app.busy and "至少一种文件格式" in app.status.get()
+            app.set_search_formats({".pdf"})
+            app.buttons["compare"].invoke()
+            wait_for_idle()
+            assert not app.rows and "没有所选格式" in app.status.get()
+            app.set_search_formats({".png"})
             app.buttons["compare"].invoke()
             wait_for_idle()
             assert len(app.rows) == 1 and app.location_path.get().endswith("可编辑原稿 B.svg")
@@ -565,7 +656,7 @@ def main():
             assert app.buttons["reveal"].instate(("!disabled",))
             app.load_query(Image.new("RGB", (200, 200), "black"))
             assert app.buttons["paste"].instate(("!disabled",))
-            app.load_query(read_image(APP_DIR / "demo" / "客户截图.jpg"))
+            app.load_query(read_image(DEMO_DIR / "客户截图.jpg"))
             wait_for_idle()
             assert not app.rows and "开始对比" in app.status.get()
             app.buttons["compare"].invoke()
