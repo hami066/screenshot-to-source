@@ -1,12 +1,12 @@
-# Honey（截图溯源）
+# Screenshot to Source（截图溯源）
 
 「截图找原稿」是一款 Windows 桌面工具。只有客户发来的截图，也能在本机找到对应的设计原稿。按 **Ctrl+V** 粘贴截图，选择搜索文件夹，再点 **开始对比**。找到候选后，可以并排核对画面，并在资源管理器里选中文件。
 
-**[下载 Windows 版（x64）](https://github.com/hami066/Honey/releases/latest/download/screenshot-to-source-windows-x64.zip)** · [观看演示视频](https://github.com/hami066/Honey/releases/latest/download/screenshot-to-source-demo.mp4) · [版本说明](https://github.com/hami066/Honey/releases/latest)
+**[下载 Windows 版（x64）](https://github.com/hami066/screenshot-to-source/releases/latest/download/screenshot-to-source-windows-x64.zip)** · [观看演示视频](https://github.com/hami066/screenshot-to-source/releases/latest/download/screenshot-to-source-demo.mp4) · [版本说明](https://github.com/hami066/screenshot-to-source/releases/latest)
 
 ![内置样例匹配结果，左侧是候选文件，右侧并排显示截图和匹配预览](docs/preview.png)
 
-Honey (Screenshot to Source) is an offline Windows desktop app that finds local PSD, PSB, PDF and PDF-compatible AI files from cropped or annotated screenshots. It can also compare exported images and remember their linked source files. It runs without an account, API key or Internet connection.
+Screenshot to Source is an offline Windows desktop app that finds local PSD, PSB, PDF and PDF-compatible AI files from cropped or annotated screenshots. It can also compare exported images and remember their linked source files. It runs without an account, API key or Internet connection.
 
 ## 一分钟试用
 
@@ -14,7 +14,7 @@ Honey (Screenshot to Source) is an offline Windows desktop app that finds local 
 2. 打开 `ScreenshotToSource.exe`，保留同目录的 `_internal` 和 `demo` 文件夹。
 3. 点 **试用样例 → 开始对比**。选中 **导出图 B** 后，点 **在文件夹中定位**，资源管理器会选中已关联的 **可编辑原稿 B.svg**。
 
-首发包在 Windows 10 x64 上验证。Windows 可执行文件未签名，受管设备请使用公司批准的软件部署流程。需要核对下载完整性时，可从 [Release 页面](https://github.com/hami066/Honey/releases/latest) 获取 `SHA256SUMS.txt`。
+首发包在 Windows 10 x64 上验证。Windows 可执行文件未签名，受管设备请使用公司批准的软件部署流程。需要核对下载完整性时，可从 [Release 页面](https://github.com/hami066/screenshot-to-source/releases/latest) 获取 `SHA256SUMS.txt`。
 
 ## 用在自己的项目里
 
@@ -36,7 +36,7 @@ Honey (Screenshot to Source) is an offline Windows desktop app that finds local 
 
 对比在本机运行，程序没有上传、账号、遥测或在线分析接口。截图、预览和匹配特征在内存中处理。「记住原稿」会在当前搜索文件夹保存路径关联，外观偏好会保存在 Windows 的当前用户设置中。完整读写范围和部署条件见 [SECURITY.md](SECURITY.md)。
 
-遇到问题可在 [Issues](https://github.com/hami066/Honey/issues) 提交 Windows 版本、文件格式和复现步骤。需要附图时，请用可公开的样例。
+遇到问题可在 [Issues](https://github.com/hami066/screenshot-to-source/issues) 提交 Windows 版本、文件格式和复现步骤。需要附图时，请用可公开的样例。
 
 ## 从源码运行
 
