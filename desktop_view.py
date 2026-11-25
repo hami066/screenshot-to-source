@@ -2,17 +2,20 @@
 
 import tkinter as tk
 from pathlib import Path
+from time import monotonic
 from tkinter import font as tkfont, ttk
 
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageTk
 from tkinterdnd2 import DND_FILES
 
-from catalog import IMAGE_SUFFIXES, parse_suffixes
+from catalog import IMAGE_SUFFIXES
 from desktop_notice import CompletionNotice
 from desktop_theme import (
-    APPEARANCES, DARK, DETAIL, FONT, LIGHT, SECTION, TITLE, DesktopStyles, icon, load_appearance,
-    paint_backdrop, rounded_surface, save_appearance, style_caption, system_theme,
+    APPEARANCES, BODY, DARK, DETAIL, FONT, LIGHT, SECTION, TITLE, DesktopStyles, desktop_animation_enabled,
+    icon, load_appearance, paint_backdrop, rounded_surface, save_appearance, style_caption, system_theme,
 )
+from format_picker import FormatPicker
+from gradient_ascii import ascii_field, ascii_sweep
 
 
 class ProgressMeter(tk.Canvas):
@@ -99,34 +102,43 @@ class DesktopView(tk.Canvas):
         self.pictures = {}
         self.icons = {}
         self.labels = {}
+        self.format_picker = self.layout_job = None
+        self.sweep_timer = self.sweep_last_frame = None
+        self.sweep_phase = .24
+        self.motion_enabled = desktop_animation_enabled()
         self.pack(fill="both", expand=True)
         self.create_image(0, 0, anchor="nw", tags="backdrop")
+        self.create_image(0, 0, anchor="nw", tags="ascii-sweep", state="hidden")
+        self.create_image(0, 0, anchor="nw", tags="toolbar-surface")
         self.create_image(0, 0, anchor="nw", tags="brand")
         self.create_image(0, 0, anchor="nw", tags="path-surface")
-        self.create_line(0, 0, 0, 0, tags="sidebar-rule")
+        for name in ("results", "query", "match", "results-empty"):
+            self.create_image(0, 0, anchor="nw", tags=f"{name}-glyph")
         self.label_widths = {}
 
-        self.label("title", "截图找原稿", size=TITLE, bold=True)
-        self.label("subtitle", "在本机用截图定位设计原稿", muted=True)
-        self.label("scope-heading", "搜索范围", size=SECTION, bold=True)
-        self.label("scope", app.project_line, muted=True)
-        self.label("results", "对比结果", size=SECTION)
+        self.label("product", "截图找原稿", size=SECTION, bold=True, anchor="w")
+        self.label("title", "用截图找到原稿", size=TITLE, bold=True, anchor="n")
+        self.label("subtitle", "在本机比对设计稿、文档和图片", size=BODY, muted=True, anchor="n")
+        self.label("scope-heading", "搜索范围", bold=True, anchor="w")
+        self.label("scope", app.project_line, muted=True, anchor="w")
+        self.label("input-heading", "截图", bold=True, anchor="w")
+        self.label("results", "对比结果", size=SECTION, bold=True, anchor="w")
         self.label("summary", app.result_summary, muted=True)
         self.label("progress", app.progress_text, muted=True)
         self.label("status", app.status, muted=True)
-        self.label("query", "客户截图", bold=True)
-        self.label("match", "原稿预览", bold=True)
+        self.label("query", "客户截图", size=SECTION, bold=True, anchor="w")
+        self.label("match", "原稿预览", size=SECTION, bold=True, anchor="w")
         self.label("evidence", app.evidence_line, muted=True)
         self.label("location", app.location_label)
 
         for name, text, command, glyph in (
             ("open", "选择文件夹…", app.choose_project, "folder"),
             ("demo", "试用样例", app.open_demo, None),
-            ("formats", "", self.open_search_formats, "chevron"),
+            ("formats", "搜索格式", self.open_search_formats, "chevron"),
             ("paste", "粘贴截图", app.paste_query, "clipboard"),
             ("search", "选择截图…", app.choose_query, "picture"),
             ("clear", "清除", app.clear_query, None),
-            ("compare", "开始对比", app.start_compare, None),
+            ("compare", "开始对比", app.start_compare, "search"),
             ("cancel", "取消对比", app.cancel_compare, None),
             ("remember", "记住原稿…", app.remember_source, None),
             ("reveal", "在文件夹中定位", app.reveal_selected_file, None),
@@ -145,10 +157,9 @@ class DesktopView(tk.Canvas):
         )
         self.icons["appearance"] = "chevron"
         app.buttons["formats"].configure(compound="right")
-        self.update_format_button()
         app.progress = ProgressMeter(self, app.progress_value)
         app.rows = {}
-        app.tree = ttk.Treeview(self, columns=("match",), show="tree headings", selectmode="browse",
+        app.tree = ttk.Treeview(self, columns=("match",), show="tree", selectmode="browse",
                                 style="Results.Treeview")
         app.tree.heading("#0", text="文件名", anchor="w")
         app.tree.heading("match", text="匹配状态")
@@ -164,19 +175,23 @@ class DesktopView(tk.Canvas):
         app.match_preview = preview_type(self, "对比后显示匹配画面")
         self.path_entry = ttk.Entry(self, textvariable=app.location_path, state="readonly", style="Path.TEntry")
         app.location_path.trace_add("write", self.update_path)
+        app.evidence_line.trace_add("write", self.update_path)
         app.progress_text.trace_add("write", lambda *_: self.update_progress())
 
         self.window_icon = ImageTk.PhotoImage(icon("crop", "#2158a8", self.styles.px(32)), master=root)
         root.iconphoto(True, self.window_icon)
         self.refresh_theme()
         self.bind("<Configure>", self.schedule_layout)
+        for event in ("<Map>", "<Unmap>"):
+            self.bind(event, lambda _: self.after_idle(self.sync_sweep_timer), add="+")
         root.bind("<Map>", self.on_map, add="+")
+        root.bind("<ButtonPress-1>", self.close_formats_on_outside_click, add="+")
+        root.bind("<Escape>", self.close_search_formats, add="+")
         root.after(1000, self.follow_system_theme)
 
-    def label(self, name, text, *, size=DETAIL, bold=False, muted=False):
+    def label(self, name, text, *, size=DETAIL, bold=False, muted=False, anchor="nw"):
         font = tkfont.Font(root=self, family=FONT, size=self.styles.px(size), weight="bold" if bold else "normal")
-        item = self.create_text(0, 0, anchor="nw", font=font,
-                                tags=name, justify="left")
+        item = self.create_text(0, 0, anchor=anchor, font=font, tags=name, justify="left")
         if isinstance(text, tk.Variable):
             def update(*_):
                 value = text.get()
@@ -214,6 +229,8 @@ class DesktopView(tk.Canvas):
     def follow_system_theme(self):
         if self.appearance.get() == "system":
             self.refresh_theme()
+        self.motion_enabled = desktop_animation_enabled()
+        self.sync_sweep_timer()
         self.after(1000, self.follow_system_theme)
 
     def appearance_label(self):
@@ -226,96 +243,35 @@ class DesktopView(tk.Canvas):
         finally:
             self.appearance_menu.grab_release()
 
-    def update_format_button(self):
-        chosen = self.app.active_suffixes
-        labels = [label for _, fields in self.app.format_groups for label, suffixes in fields.items()
-                  if chosen.intersection(suffixes)]
-        labels.extend(sorted(chosen - self.listed_suffixes()))
-        summary = labels[0] if len(labels) == 1 else f"已选 {len(labels)} 项"
-        if len(summary) > 16:
-            summary = summary[:15] + "…"
-        self.app.buttons["formats"].configure(text=f"搜索格式 · {summary}")
-
     def listed_suffixes(self):
         return {suffix for _, fields in self.app.format_groups for group in fields.values() for suffix in group}
 
+    def prepare_format_picker(self):
+        if self.format_picker is None:
+            self.format_picker = FormatPicker(self)
+
     def open_search_formats(self):
-        p = self.palette
-        px = self.styles.px
-        dialog = tk.Toplevel(self.app.root)
-        dialog.withdraw()
-        dialog.title("选择搜索格式")
-        dialog.transient(self.app.root)
-        dialog.resizable(False, False)
-        dialog.configure(background=p.sidebar)
-        frame = tk.Frame(dialog, background=p.sidebar, padx=px(20), pady=px(16))
-        frame.pack(fill="both", expand=True)
-        chosen = self.app.active_suffixes
-        options = []
+        self.prepare_format_picker()
+        if self.format_picker.opened:
+            self.format_picker.close()
+        else:
+            self.format_picker.open()
 
-        def label(text, size, color, weight="normal"):
-            content = {"textvariable": text} if isinstance(text, tk.Variable) else {"text": text}
-            tk.Label(frame, background=p.sidebar, foreground=color, font=(FONT, px(size), weight),
-                     anchor="w", **content).pack(fill="x")
+    def close_search_formats(self, _event=None):
+        if self.format_picker and self.format_picker.opened:
+            self.format_picker.close()
+            return "break"
 
-        label("只比对你勾选的文件格式", SECTION, p.text, "bold")
-        for heading, fields in self.app.format_groups:
-            label(heading, DETAIL, p.text, "bold")
-            row = tk.Frame(frame, background=p.sidebar)
-            row.pack(fill="x", pady=(px(5), px(15)))
-            for index, (name, suffixes) in enumerate(fields.items()):
-                choice = tk.BooleanVar(dialog, value=bool(chosen.intersection(suffixes)))
-                options.append((choice, suffixes))
-                column, line = index % 3, index // 3
-                row.columnconfigure(column, weight=1, minsize=px(104))
-                ttk.Checkbutton(row, text=f"  {name}", variable=choice, style="Filter.TCheckbutton").grid(
-                    row=line, column=column, sticky="w", pady=px(3))
-        label("其他后缀", DETAIL, p.text, "bold")
-        custom = tk.StringVar(dialog, value=", ".join(sorted(chosen - self.listed_suffixes())))
-        custom_entry = ttk.Entry(frame, textvariable=custom, style="Path.TEntry")
-        custom_entry.pack(fill="x", pady=(px(5), px(2)), ipady=px(4))
-        label("例如 .cdr, .indd。按后缀列出文件。", DETAIL, p.muted)
-        label("文件名或 TXT 内容关键词（可选）", DETAIL, p.text, "bold")
-        keyword = tk.StringVar(dialog, value=self.app.active_keyword)
-        ttk.Entry(frame, textvariable=keyword, style="Path.TEntry").pack(
-            fill="x", pady=(px(5), px(3)), ipady=px(4))
-        label("关键词仅用于 TXT 和其他不支持画面预览的格式。", DETAIL, p.muted)
-        error = tk.StringVar(dialog)
-        label(error, DETAIL, p.text)
-        actions = tk.Frame(frame, background=p.sidebar)
-        actions.pack(fill="x", pady=(px(14), 0))
-
-        def apply():
-            try:
-                additional = parse_suffixes(custom.get())
-            except ValueError as problem:
-                error.set(str(problem))
-                custom_entry.focus_set()
+    def close_formats_on_outside_click(self, event):
+        picker = self.format_picker
+        widget = event.widget
+        if not picker or not picker.opened or widget is self.app.buttons["formats"]:
+            return
+        while widget is not None:
+            if widget is picker:
                 return
-            suffixes = {suffix for choice, group in options if choice.get() for suffix in group}
-            self.app.set_search_formats(suffixes | additional, keyword.get())
-            dialog.destroy()
-
-        def action(text, bg, fg, command, side):
-            button = tk.Button(actions, text=text, background=bg, foreground=fg, relief="flat", borderwidth=0,
-                               activebackground=p.hover, activeforeground=p.text, highlightthickness=0,
-                               font=(FONT, px(DETAIL)), padx=px(12), pady=px(6), command=command)
-            button.pack(side=side, padx=(0, px(6)))
-            return button
-
-        action("取消", p.panel, p.text, dialog.destroy, "right")
-        confirm = action("应用", p.primary, "#ffffff", apply, "right")
-        dialog.bind("<Escape>", lambda _: dialog.destroy())
-        dialog.bind("<Return>", lambda _: apply())
-        dialog.update_idletasks()
-        root = self.app.root
-        x = max(0, root.winfo_rootx() + (root.winfo_width() - dialog.winfo_reqwidth()) // 2)
-        y = max(0, root.winfo_rooty() + (root.winfo_height() - dialog.winfo_reqheight()) // 2)
-        dialog.geometry(f"+{x}+{y}")
-        dialog.deiconify()
-        dialog.wait_visibility()
-        dialog.grab_set()
-        confirm.focus_set()
+            widget = getattr(widget, "master", None)
+        picker.close(restore_focus=False)
 
     def select_appearance(self):
         save_appearance(self.appearance.get())
@@ -329,6 +285,10 @@ class DesktopView(tk.Canvas):
             self.apply_theme(palette)
 
     def apply_theme(self, palette):
+        if self.format_picker is not None:
+            self.format_picker.close(restore_focus=False)
+            self.format_picker.destroy()
+            self.format_picker = None
         self.palette = palette
         self.styles.use(palette)
         self.configure(background=palette.base)
@@ -341,11 +301,21 @@ class DesktopView(tk.Canvas):
             self.itemconfigure(name, fill=palette.muted if muted else palette.text)
         small_icon = self.styles.px(16)
         for name, glyph in self.icons.items():
-            photo = self.photo(f"icon-{name}", icon(glyph, palette.muted, small_icon))
-            disabled = self.photo(f"icon-{name}-disabled", icon(glyph, palette.disabled, small_icon))
+            color = "#ffffff" if name == "compare" else palette.muted
+            size = self.styles.px(14) if glyph == "chevron" else small_icon
+            photo = self.photo(f"icon-{name}", icon(glyph, color, size, centered=True))
+            disabled = self.photo(f"icon-{name}-disabled", icon(glyph, palette.disabled, size, centered=True))
             self.app.buttons[name].configure(image=(photo, "disabled", disabled))
-        self.itemconfigure("brand", image=self.photo("brand", icon("crop", palette.accent, self.styles.px(36))))
-        self.itemconfigure("sidebar-rule", fill=palette.panel_edge)
+        px = self.styles.px
+        brand = rounded_surface((px(30), px(30)), palette.primary, px(9))
+        brand.alpha_composite(icon("crop", "#ffffff", px(18)), (px(6), px(6)))
+        self.itemconfigure("brand", image=self.photo("brand", brand))
+        for name, glyph in (("results", "search"), ("query", "picture"), ("match", "match")):
+            tag = f"{name}-glyph"
+            self.itemconfigure(tag, image=self.photo(tag, icon(glyph, palette.accent, px(17), centered=True)))
+        empty = rounded_surface((px(50), px(50)), palette.preview, px(15))
+        empty.alpha_composite(icon("search", palette.muted, px(22)), (px(14), px(14)))
+        self.itemconfigure("results-empty-glyph", image=self.photo("results-empty-glyph", empty))
         self.file_icons = {
             kind: self.photo(f"file-{kind}", icon(kind, palette.muted, small_icon))
             for kind in ("ps", "ai", "pdf", "raster", "file")
@@ -353,6 +323,7 @@ class DesktopView(tk.Canvas):
         for row, record in self.app.rows.items():
             self.app.tree.item(row, image=self.file_icon(Path(record.export)))
         self.layout()
+        self.after_idle(self.prepare_format_picker)
 
     def file_icon(self, path):
         suffix = path.suffix.lower()
@@ -365,10 +336,13 @@ class DesktopView(tk.Canvas):
         return photo
 
     def schedule_layout(self, _event):
-        if getattr(self, "layout_job", None) is None:
-            self.layout_job = self.after(22, self.layout)
+        if self.layout_job is not None:
+            self.after_cancel(self.layout_job)
+        self.layout_job = self.after(60, self.layout)
 
     def layout(self):
+        if self.layout_job is not None:
+            self.after_cancel(self.layout_job)
         self.layout_job = None
         w, h = self.winfo_width(), self.winfo_height()
         if w < 200 or h < 200:
@@ -376,76 +350,172 @@ class DesktopView(tk.Canvas):
         p = self.palette
         px = self.styles.px
         button_width = lambda name: self.styles.button_size(name)[0]
-        margin = px(24)
-        sidebar = min(px(356), max(px(304), w // 3))
-        middle = sidebar + margin
-        right = w - margin
+        left = max(px(24), (w - px(1340)) // 2)
+        right = w - left
+        gap = px(14)
+        result_width = min(px(340), max(px(242), (right - left) * 27 // 100))
+        middle = left + result_width + gap
         right_width = right - middle
-        footer = h - px(56)
-        card_bottom = footer - px(48)
-        preview_top = px(264)
-        preview_gap = px(16)
-        preview_width = (right_width - preview_gap) // 2
-        right_preview = middle + preview_width + preview_gap
+        footer = h - px(48)
+        compact = h < px(650)
+        header_offset = px(18) if compact else 0
+        card_top, card_bottom = px(308) - header_offset, footer - px(28)
+        preview_top = card_top + px(48)
+        preview_width = (right_width - gap) // 2
+        right_preview = middle + preview_width + gap
+        match_width = right - right_preview
+        toolbar_top = px(156) - header_offset
+        toolbar_height = px(96)
+        inside = left + px(16)
+        divider = inside + px(273)
+        input_left = divider + px(16)
+        action_y = toolbar_top + px(41)
+        compare_left = right - px(16) - button_width("compare")
 
-        self.background = background = paint_backdrop(p, (w, h), sidebar, px)
+        self.background = background = paint_backdrop(p, (w, h), px)
+        field_top = px(56)
+        cell = px(14)
+        field = ascii_field(w, toolbar_top + toolbar_height - field_top, cell, toolbar_top - field_top, p.dark)
+        background.paste(field, (0, field_top), field)
+        toolbar_size = (right - left, toolbar_height)
+        shadow = rounded_surface(toolbar_size, (6, 18, 50, 9) if not p.dark else (0, 0, 0, 25), px(18))
+        background.paste(shadow, (left, toolbar_top + px(4)), shadow)
+        for x, width in ((left, result_width), (middle, preview_width), (right_preview, match_width)):
+            self.paint_card(background, x, card_top, width, card_bottom - card_top)
         self.itemconfigure("backdrop", image=self.photo("backdrop", background))
-        self.coords("brand", margin, px(28))
-        self.coords("title", px(72), px(16))
-        self.coords("subtitle", px(74), px(59))
-        self.place_buttons(background, ("appearance",), right - button_width("appearance"), px(30), gap=0)
+        self.sweep_mask = ascii_sweep(cell)
+        sweep_start = max(0, toolbar_top - px(53) - field_top)
+        self.sweep_band = field.crop((0, sweep_start, w, sweep_start + self.sweep_mask.height))
+        self.sweep_y = field_top + sweep_start
+        self.sweep_x = None
+        self.itemconfigure("ascii-sweep", image=self.photo("ascii-sweep", Image.new("RGBA", self.sweep_mask.size)))
+        self.sync_sweep_timer()
+        toolbar_fill = (*ImageColor.getrgb(p.panel), 224 if p.dark else 226)
+        toolbar = rounded_surface(toolbar_size, toolbar_fill, px(18), edge=p.panel_edge)
+        ImageDraw.Draw(toolbar).line((divider - left, px(14), divider - left, toolbar_height - px(14)), fill=p.panel_edge)
+        self.coords("toolbar-surface", left, toolbar_top)
+        self.itemconfigure("toolbar-surface", image=self.photo("toolbar-surface", toolbar))
+        background.paste(toolbar, (left, toolbar_top), toolbar)
+        self.coords("brand", left, px(13))
+        self.coords("product", left + px(40), px(28))
+        self.coords("title", w // 2, px(71 if compact else 76))
+        self.coords("subtitle", w // 2, px(116 if compact else 124))
+        self.place_buttons(background, ("demo", "appearance"),
+                           right - button_width("demo") - button_width("appearance") - px(5), px(11), gap=px(5))
 
-        self.coords("scope-heading", margin, px(120))
-        self.coords("scope", margin, px(150))
-        self.fit_label("scope", self.app.project_line.get(), sidebar - 2 * margin)
-        self.place_buttons(background, ("open", "demo"), margin, px(176), gap=px(8))
-        self.place_buttons(background, ("formats",), margin, px(220), gap=0)
-        self.coords("sidebar-rule", margin, px(264), sidebar - margin, px(264))
-        self.coords("results", margin, px(284))
-        self.coords("summary", margin, px(314))
-        self.fit_label("summary", self.app.result_summary.get(), sidebar - 2 * margin)
-        self.tree_box = dict(x=margin, y=px(344), width=sidebar - 2 * margin, height=h - px(372))
-        self.scroll_box = dict(x=sidebar - margin + px(4), y=px(376), width=px(6), height=h - px(404))
+        self.coords("scope-heading", inside, toolbar_top + px(24))
+        self.coords("scope", inside + px(69), toolbar_top + px(24))
+        self.fit_label("scope", self.app.project_line.get(), divider - inside - px(86))
+        self.coords("input-heading", input_left, toolbar_top + px(24))
+        self.place_buttons(background, ("open", "formats"), inside, action_y, gap=px(8))
+        self.place_buttons(background, ("paste", "search", "clear"), input_left, action_y, gap=px(8))
+        self.place_buttons(background, ("compare",), compare_left, action_y, gap=0)
+
+        for name, x in (("results", left), ("query", middle), ("match", right_preview)):
+            heading_y = card_top + px(24)
+            self.coords(name, x + px(40), heading_y)
+            self.coords(f"{name}-glyph", x + px(16), heading_y - px(17) // 2)
+        results_middle = (card_top + card_bottom) // 2 + px(14)
+        self.coords("results-empty-glyph", left + (result_width - px(50)) // 2, results_middle - px(41))
+        self.summary_locations = ((left + result_width // 2, results_middle + px(17)),
+                                  (left + px(16), card_top + px(40)))
+        self.fit_label("summary", self.app.result_summary.get(), result_width - px(32))
+        tree_top = card_top + px(66)
+        self.tree_box = dict(x=left + px(11), y=tree_top, width=result_width - px(24),
+                             height=card_bottom - tree_top - px(12))
+        self.scroll_box = dict(x=left + result_width - px(10), y=tree_top, width=px(4),
+                               height=card_bottom - tree_top - px(12))
         status_width = self.app.tree.column("match", "width")
         self.app.tree.column("#0", width=self.tree_box["width"] - status_width)
         self.update_results()
 
-        self.place_buttons(background, ("paste", "search", "clear"), middle, px(120), gap=px(8))
-        self.place_buttons(background, ("compare",), right - button_width("compare"), px(120), gap=0)
-        self.coords("status", middle, px(174))
-        self.itemconfigure("status", width=right_width - px(96))
-        self.cancel_position = (right - button_width("cancel"), px(168))
-        progress_label_width = px(156)
-        progress_width = right_width - progress_label_width - px(12)
-        progress_y, progress_h = px(221), px(8)
-        self.progress_box = dict(x=middle, y=progress_y, width=progress_width, height=progress_h)
-        area = background.crop((middle, progress_y, middle + progress_width, progress_y + progress_h))
+        status_y = px(269) - header_offset
+        self.coords("status", left + px(2), status_y)
+        self.cancel_position = (right - button_width("cancel"), px(263) - header_offset)
+        progress_label_width = px(139)
+        progress_width = px(152)
+        progress_left = right - progress_label_width - progress_width - px(9)
+        progress_y, progress_h = px(278) - header_offset, px(6)
+        self.progress_shift = button_width("cancel") + px(8)
+        self.status_width = right - left - px(4)
+        self.progress_box = dict(x=progress_left, y=progress_y, width=progress_width, height=progress_h)
+        area = background.crop((progress_left, progress_y, progress_left + progress_width, progress_y + progress_h))
         self.app.progress.decorate(area.convert("RGBA"), p)
-        self.coords("progress", middle + progress_width + px(12), px(213))
+        self.progress_label = (progress_left + progress_width + px(9), status_y)
         self.fit_label("progress", self.app.progress_text.get(), progress_label_width)
         self.update_progress()
 
-        self.coords("query", middle, preview_top - px(24))
-        self.coords("match", right_preview, preview_top - px(24))
-        self.coords("evidence", middle, card_bottom + px(8))
-        self.fit_label("evidence", self.app.evidence_line.get(), right_width)
-        preview_height = card_bottom - preview_top
-        for x, preview in ((middle, self.app.query_preview), (right_preview, self.app.match_preview)):
-            area = background.crop((x, preview_top, x + preview_width, card_bottom)).convert("RGBA")
-            area.alpha_composite(rounded_surface(area.size, p.panel, px(14), edge=p.panel_edge, bottom=p.preview))
+        inset = px(9)
+        preview_height = card_bottom - preview_top - inset
+        for left_edge, width, preview in ((middle, preview_width, self.app.query_preview),
+                                          (right_preview, match_width, self.app.match_preview)):
+            x = left_edge + inset
+            width -= 2 * inset
+            area = Image.new("RGBA", (width, preview_height), p.panel)
+            area.alpha_composite(rounded_surface(area.size, p.preview, px(12)))
             preview.decorate(area, p)
-            preview.place(x=x, y=preview_top, width=preview_width, height=preview_height)
+            preview.place(x=x, y=preview_top, width=width, height=preview_height)
 
-        self.coords("location", middle, footer - px(18))
-        gap = px(8)
-        button_left = right - button_width("remember") - button_width("reveal") - gap
-        path_width = button_left - gap - middle
+        self.coords("location", middle, footer - px(21))
+        self.coords("evidence", middle + px(121), footer - px(21))
+        self.fit_label("evidence", self.app.evidence_line.get(), right_width - px(121))
+        button_left = right - button_width("remember") - button_width("reveal") - px(8)
+        path_width = button_left - px(8) - middle
         self.coords("path-surface", middle, footer)
         self.itemconfigure("path-surface", image=self.photo("path-surface", rounded_surface(
             (path_width, px(36)), p.panel, px(8), edge=p.panel_edge)))
         self.path_box = dict(x=middle + px(8), y=footer + px(4), width=path_width - px(16), height=px(28))
         self.path_buttons = (button_left, footer)
         self.update_path()
+        if self.format_picker is not None:
+            self.format_picker.reposition()
+
+    def paint_card(self, background, x, y, width, height):
+        panel = rounded_surface((width, height), self.palette.panel, self.styles.px(18), edge=self.palette.panel_edge)
+        background.paste(panel, (x, y), panel)
+
+    def position_sweep(self):
+        width, height = self.sweep_mask.size
+        x = round(self.sweep_phase * (self.sweep_band.width + width)) - width
+        if x == self.sweep_x:
+            return
+        self.sweep_x = x
+        sprite = self.sweep_band.crop((x, 0, x + width, height))
+        sprite.putalpha(ImageChops.multiply(sprite.getchannel("A"), self.sweep_mask))
+        self.pictures["ascii-sweep"].paste(sprite)
+        self.coords("ascii-sweep", x, self.sweep_y)
+
+    def sweep_is_active(self):
+        return ("ascii-sweep" in self.pictures and self.motion_enabled and self.winfo_viewable()
+                and self.app.root.state() in ("normal", "zoomed"))
+
+    def sync_sweep_timer(self):
+        active = self.sweep_is_active()
+        state = "normal" if active else "hidden"
+        if self.itemcget("ascii-sweep", "state") != state:
+            self.itemconfigure("ascii-sweep", state=state)
+        if active:
+            self.position_sweep()
+            if self.sweep_timer is None:
+                self.sweep_timer = self.after(33, self.tick_sweep)
+            return
+        if self.sweep_timer is not None:
+            self.after_cancel(self.sweep_timer)
+            self.sweep_timer = None
+        self.sweep_last_frame = None
+
+    def tick_sweep(self):
+        self.sweep_timer = None
+        if not self.sweep_is_active():
+            self.sync_sweep_timer()
+            return
+        now = monotonic()
+        elapsed = min(.12, now - self.sweep_last_frame) if self.sweep_last_frame is not None else .033
+        self.sweep_last_frame = now
+        self.sweep_phase = (self.sweep_phase + elapsed / 4.3) % 1
+        self.position_sweep()
+        menu_open = self.format_picker is not None and self.format_picker.opened
+        self.sweep_timer = self.after(90 if self.app.busy or menu_open else 33, self.tick_sweep)
 
     def set_scroll(self, first, last):
         self.scroll.set(first, last)
@@ -457,7 +527,11 @@ class DesktopView(tk.Canvas):
     def update_results(self):
         if not hasattr(self, "tree_box"):
             return
-        if self.app.rows:
+        filled = bool(self.app.rows)
+        self.itemconfigure("results-empty-glyph", state="hidden" if filled else "normal")
+        self.itemconfigure("summary", anchor="nw" if filled else "n")
+        self.coords("summary", *self.summary_locations[filled])
+        if filled:
             self.app.tree.place(**self.tree_box)
         else:
             self.app.tree.place_forget()
@@ -467,9 +541,13 @@ class DesktopView(tk.Canvas):
         if not hasattr(self, "progress_box"):
             return
         active = self.app.progress_text.get() != "等待开始"
+        shift = self.progress_shift if self.app.comparing else 0
+        self.itemconfigure("status", width=self.status_width if not active else
+                           self.progress_box["x"] - shift - self.coords("status")[0] - self.styles.px(12))
+        self.coords("progress", self.progress_label[0] - shift, self.progress_label[1])
         self.itemconfigure("progress", state="normal" if active else "hidden")
         if active:
-            self.app.progress.place(**self.progress_box)
+            self.app.progress.place(**(self.progress_box | {"x": self.progress_box["x"] - shift}))
         else:
             self.app.progress.place_forget()
         if self.app.comparing:
@@ -483,6 +561,7 @@ class DesktopView(tk.Canvas):
         visible = bool(self.app.location_path.get())
         for name in ("location", "path-surface"):
             self.itemconfigure(name, state="normal" if visible else "hidden")
+        self.itemconfigure("evidence", state="normal" if self.app.evidence_line.get() else "hidden")
         if visible:
             self.path_entry.place(**self.path_box)
             self.path_entry.after_idle(self.path_entry.xview_moveto, 1)

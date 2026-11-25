@@ -7,12 +7,12 @@ from threading import Event
 from unittest.mock import patch
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageColor, ImageDraw
 
 from app import DEFAULT_SUFFIXES, App
 from catalog import CATALOG_NAME, IMAGE_SUFFIXES, Catalog, parse_suffixes, scan_exports
 from design_preview import ARCHIVE_ENTRIES, DESIGN_SUFFIXES, PreviewUnavailable
-from desktop_theme import header_mask
+from desktop_theme import DARK, LIGHT, paint_backdrop
 from local_paths import local_path, project_file
 from matcher import Matcher, read_image, read_reference
 from smoke import run, run_file_formats
@@ -21,14 +21,13 @@ DEMO = Path(__file__).resolve().parent.parent / "demo"
 
 
 class DesktopThemeTests(unittest.TestCase):
-    def test_search_watermark_keeps_blurred_glyphs_inside_layer(self):
-        for scale in (1, 1.25, 1.5, 2):
-            with self.subTest(scale=scale):
-                width, height = round(208 * scale), round(66 * scale)
-                bounds = header_mask((width, height), "search").getbbox()
-                self.assertIsNotNone(bounds)
-                left, top, right, bottom = bounds
-                self.assertGreater(min(left, top, width - right, height - bottom), 0)
+    def test_header_tint_stays_between_navigation_and_workspace(self):
+        for palette in (LIGHT, DARK):
+            with self.subTest(dark=palette.dark):
+                background = paint_backdrop(palette, (945, 610), int)
+                self.assertEqual(background.getpixel((470, 10)), ImageColor.getrgb(palette.caption))
+                self.assertNotEqual(background.getpixel((470, 60)), ImageColor.getrgb(palette.base))
+                self.assertEqual(background.getpixel((470, 240)), ImageColor.getrgb(palette.base))
 
 
 class DesktopCoreTests(unittest.TestCase):

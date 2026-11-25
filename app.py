@@ -13,7 +13,7 @@ from tkinterdnd2 import TkinterDnD
 
 from catalog import IMAGE_SUFFIXES, IMAGE_TYPES, Catalog, Record, matches_keyword, scan_exports, text_key
 from clipboard_image import ClipboardImageError, read_clipboard_image
-from desktop_theme import BODY, DETAIL, FONT, display_scale, enable_windows_dpi, icon
+from desktop_theme import BODY, DETAIL, FONT, display_scale, enable_windows_dpi, icon, rounded_surface
 from desktop_view import DesktopView
 from design_preview import ARCHIVE_ENTRIES, DOCUMENT_SUFFIXES, PHOTOSHOP_SUFFIXES
 from local_paths import project_file
@@ -48,8 +48,11 @@ class Preview(tk.Canvas):
     def decorate(self, surface, palette):
         self.surface = ImageTk.PhotoImage(surface, master=self)
         self.palette = palette
-        self.empty_icon = ImageTk.PhotoImage(icon("crop" if self.query else "file", palette.muted, self.px(32)),
-                                            master=self)
+        size = self.px(50)
+        tile = rounded_surface((size, size), palette.panel, self.px(15), edge=palette.panel_edge)
+        glyph = icon("crop" if self.query else "file", palette.accent if self.query else palette.muted, self.px(22))
+        tile.alpha_composite(glyph, ((size - glyph.width) // 2, (size - glyph.height) // 2))
+        self.empty_icon = ImageTk.PhotoImage(tile, master=self)
         self.paint()
 
     def set(self, image=None, box=None):
@@ -90,15 +93,11 @@ class Preview(tk.Canvas):
     def paint_empty(self, x, y):
         palette = self.palette
         px = self.px
-        self.create_image(x, y - px(30), image=self.empty_icon)
-        self.create_text(x, y, text=self.hint, fill=palette.muted, font=(FONT, px(BODY)))
+        self.create_image(x, y - px(20 if self.query else 14), image=self.empty_icon)
+        self.create_text(x, y + px(17 if self.query else 26), text=self.hint, fill=palette.text,
+                         width=max(px(80), self.winfo_width() - px(24)), justify="center", font=(FONT, px(BODY)))
         if self.query:
-            modifier = "⌘" if sys.platform == "darwin" else "Ctrl"
-            for label, start, end in ((modifier, -36, 2), ("V", 10, 36)):
-                left, right = x + px(start), x + px(end)
-                self.create_rectangle(left, y + px(21), right, y + px(43), fill=palette.panel, outline=palette.panel_edge)
-                self.create_text((left + right) / 2, y + px(32), text=label, fill=palette.muted,
-                                 font=(FONT, px(DETAIL)))
+            self.create_text(x, y + px(40), text=PASTE_SHORTCUT, fill=palette.muted, font=(FONT, px(DETAIL)))
 
 
 class App:
@@ -145,7 +144,9 @@ class App:
         root = self.root
         root.title("截图找原稿 · Screenshot to Source")
         scale = display_scale(root)
-        root.geometry(f"{round(1080 * scale)}x{round(670 * scale)}")
+        width = min(round(1120 * scale), max(round(945 * scale), root.winfo_screenwidth() - round(48 * scale)))
+        height = min(round(720 * scale), max(round(610 * scale), root.winfo_screenheight() - round(88 * scale)))
+        root.geometry(f"{width}x{height}")
         root.minsize(round(945 * scale), round(610 * scale))
         self.view = DesktopView(self, Preview)
         self.sync_buttons()
@@ -189,7 +190,6 @@ class App:
             self.demo_suffixes = frozenset({".png"})
             self.demo_keyword = ""
         self.catalog, self.matcher, self.is_demo = catalog, Matcher(), demo
-        self.view.update_format_button()
         self.project_line.set("内置样例" if demo else f"{catalog.root}（含子文件夹）")
         self.reset_results()
         self.show_ready_status()
@@ -265,7 +265,6 @@ class App:
         else:
             self.search_suffixes = chosen
             self.file_keyword = keyword
-        self.view.update_format_button()
         self.reset_results()
         self.show_ready_status()
 

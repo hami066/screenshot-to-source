@@ -3,22 +3,20 @@
 import ctypes
 import sys
 from dataclasses import dataclass
-from functools import lru_cache
-from pathlib import Path
 from tkinter import ttk
 
 import numpy as np
-from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageTk
+from PIL import Image, ImageColor, ImageDraw, ImageTk
 
 FONT = "PingFang SC" if sys.platform == "darwin" else "Microsoft YaHei UI"
 BODY = -15
 DETAIL = -14
-SECTION = -18
-TITLE = -30
+SECTION = -17
+TITLE = -36
 BUTTONS = {
-    "open": (132, 36), "demo": (92, 36), "paste": (124, 40), "search": (124, 40), "clear": (64, 40),
-    "compare": (120, 40), "cancel": (88, 28), "remember": (96, 36), "reveal": (132, 36),
-    "appearance": (148, 36), "formats": (188, 30),
+    "open": (135, 38), "demo": (106, 34), "paste": (118, 38), "search": (112, 38), "clear": (56, 38),
+    "compare": (128, 38), "cancel": (88, 27), "remember": (96, 36), "reveal": (138, 36),
+    "appearance": (132, 34), "formats": (115, 38), "format_apply": (90, 38), "format_cancel": (72, 38),
 }
 APPEARANCES = {"system": "跟随系统", "light": "浅色", "dark": "深色"}
 PREFERENCES_KEY = r"Software\ScreenshotToSource"
@@ -43,10 +41,10 @@ class Palette:
     primary_hover: str
 
 
-DARK = Palette(True, "#0b2341", "#081b34", "#102b4c", "#f0f6ff", "#b4c8e2", "#829bb9", "#163553",
-               "#355474", "#102947", "#23496d", "#194e84", "#a7cdf8", "#1769c6", "#1d76d6")
-LIGHT = Palette(False, "#edf4fd", "#f5f9ff", "#e2edfb", "#102a4c", "#465f7d", "#607895", "#f6faff",
-                "#bfcfe3", "#e5effb", "#d9e9fc", "#c4dfff", "#215baa", "#1a5fae", "#114e96")
+DARK = Palette(True, "#101320", "#141827", "#171c2b", "#f3f5fc", "#aeb7cf", "#75829f", "#181e2e",
+               "#30394f", "#121827", "#27324b", "#243956", "#9bbcff", "#1b63e7", "#286ff2")
+LIGHT = Palette(False, "#fafbfe", "#ffffff", "#ffffff", "#161b28", "#565f73", "#757f94", "#ffffff",
+                "#e0e5ee", "#f2f4f9", "#ecf2ff", "#e8f0ff", "#1759c6", "#0965ed", "#0757ce")
 
 
 def enable_windows_dpi():
@@ -67,6 +65,17 @@ def display_scale(window):
     if sys.platform == "darwin":
         return 1.0  # Aqua uses logical points and handles Retina backing pixels.
     return window.winfo_fpixels("1i") / 96
+
+
+def desktop_animation_enabled():
+    if sys.platform == "win32":
+        enabled = ctypes.c_int()
+        return bool(ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(enabled), 0) and enabled.value)
+    if sys.platform == "darwin":
+        from AppKit import NSWorkspace
+
+        return not NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+    return False
 
 
 def load_appearance():
@@ -145,59 +154,21 @@ def style_caption(root, palette):
         set_attribute(key, r | g << 8 | b << 16)
 
 
-@lru_cache(maxsize=3)
-def header_mask(size, asset):
-    if asset == "lens":
-        path = Path(__file__).with_name("assets") / "frosted-lens.png"
-        with Image.open(path) as source:
-            return source.convert("L").resize(size, Image.Resampling.LANCZOS)
-    width, height = size
-    font_size = round(height * .85)
-    try:
-        font = ImageFont.truetype("segoeuib.ttf", font_size)
-    except OSError:
-        font = ImageFont.load_default(size=font_size)
-    mask = Image.new("L", size)
-    draw = ImageDraw.Draw(mask)
-    word = "search"
-    bounds = [draw.textbbox((0, 0), letter, font=font, anchor="ls") for letter in word]
-    widths = [draw.textlength(letter, font=font) for letter in word]
-    top = min(box[1] for box in bounds)
-    bottom = max(box[3] for box in bounds)
-    baseline = (height - top - bottom) // 2
-    blur = max(1, height * .035)
-    inset = round(3 * blur) + 2
-    x = inset - bounds[0][0]
-    last_x = width - inset - bounds[-1][2]
-    spacing = (last_x - x - sum(widths[:-1])) / (len(word) - 1)
-    for letter, advance in zip(word, widths):
-        draw.text((round(x), baseline), letter, font=font, fill=255, anchor="ls")
-        x += advance + spacing
-    mask = mask.filter(ImageFilter.GaussianBlur(blur))
-    fade = np.linspace(.28, 1.0, width, dtype=np.float32)[None, :]
-    return Image.fromarray((np.asarray(mask) * fade).astype(np.uint8))
-
-
-def paint_backdrop(palette, size, split, px):
+def paint_backdrop(palette, size, px):
     width, height = size
     image = Image.new("RGB", size, palette.base)
-    draw = ImageDraw.Draw(image)
-    header = px(96)
-    tint = "#1a4877" if palette.dark else "#d1e4fa"
-    wash = Image.linear_gradient("L").transpose(Image.Transpose.ROTATE_90).resize((width, header))
-    band = Image.new("RGB", (width, header), palette.caption)
-    band.paste(tint, (0, 0, width, header), wash)
-    art_right = width - px(24 + BUTTONS["appearance"][0] + 16)
-    for asset, dimensions, position, strength in (
-        ("search", (px(208), px(66)), (art_right - px(302), px(15)), .30),
-        ("lens", (px(92), px(92)), (art_right - px(92), px(2)), .49),
-    ):
-        mask = header_mask(dimensions, asset).point(lambda value: round(value * strength))
-        band.paste(palette.accent, (*position, position[0] + dimensions[0], position[1] + dimensions[1]), mask)
-    image.paste(band, (0, 0))
-    draw.rectangle((0, header + 1, split, height), fill=palette.sidebar)
-    draw.line((0, header, width, header), fill=palette.panel_edge)
-    draw.line((split, header, split, height), fill=palette.panel_edge)
+    nav_height = px(56)
+    band_height = min(height - nav_height, px(170))
+    if band_height > 0:
+        x = np.linspace(-1, 1, width, dtype=np.float32)[None, :]
+        y = np.linspace(0, 1, band_height, dtype=np.float32)[:, None]
+        strength = (1 - y)**2.15 * (.30 + .70 * np.exp(-2.5 * x**2))
+        mask = Image.fromarray(np.rint(strength * 255).astype(np.uint8))
+        tint = "#303e81" if palette.dark else "#b8c9ff"
+        image.paste(tint, (0, nav_height, width, nav_height + band_height), mask)
+    image.paste(palette.caption, (0, 0, width, min(nav_height, height)))
+    if nav_height < height:
+        ImageDraw.Draw(image).line((0, nav_height - 1, width, nav_height - 1), fill=palette.panel_edge)
     return image
 
 
@@ -221,7 +192,7 @@ def rounded_surface(size, fill, radius, *, edge=None, bottom=None):
     return surface.resize(size, Image.Resampling.LANCZOS)
 
 
-def icon(name, color, size=18, *, background=None):
+def icon(name, color, size=18, *, background=None, centered=False):
     image = Image.new("RGBA", (72, 72))
     draw = ImageDraw.Draw(image)
     point = lambda x, y: (round(x * 4), round(y * 4))
@@ -238,10 +209,8 @@ def icon(name, color, size=18, *, background=None):
         for x, y, dx, dy in ((2, 2, 1, 1), (16, 2, -1, 1), (2, 16, 1, -1), (16, 16, -1, -1)):
             line((x + 4 * dx, y), (x, y), (x, y + 4 * dy))
         box(6, 6, 12, 12, 1)
-    elif name in ("checked", "unchecked"):
-        draw.rounded_rectangle((*point(2, 2), *point(16, 16)), 12, outline=color, width=5, fill=background)
-        if name == "checked":
-            line((5.2, 9), (8, 11.7), (13, 6.6))
+    elif name == "tick":
+        line((3.8, 9), (7.4, 12.6), (14.2, 5.7))
     elif name == "folder":
         line((2, 14.5), (2, 4), (6, 4), (8, 6), (15.5, 6), (15.5, 8))
         line((2, 14.5), (14, 14.5), (16, 8), (4.5, 8), (2, 14.5))
@@ -249,6 +218,12 @@ def icon(name, color, size=18, *, background=None):
         box(2.1, 3.5, 15.8, 14.5)
         line((2.5, 13), (6.3, 9.4), (9.2, 12), (12, 8.9), (15.2, 11.8))
         draw.ellipse((*point(5.3, 5.4), *point(7.6, 7.7)), fill=color)
+    elif name == "search":
+        draw.ellipse((*point(2.3, 2.3), *point(11.8, 11.8)), outline=color, width=5)
+        line((10.6, 10.6), (15.7, 15.7))
+    elif name == "match":
+        box(3, 3, 15, 15, 2)
+        line((6, 9), (8.2, 11.2), (12.3, 7))
     elif name == "clipboard":
         line((8, 3), (4, 3), (3, 4), (3, 14.5), (7, 14.5))
         box(8, 6, 15, 15.3)
@@ -289,6 +264,10 @@ def icon(name, color, size=18, *, background=None):
         else:
             line((6, 4.6), (10, 4.6), (13, 7.7), (13, 13.7), (6, 13.7), (6, 4.6))
             line((10, 4.6), (10, 7.7), (13, 7.7))
+    if centered:
+        ink = image.crop(image.getbbox())
+        image = Image.new("RGBA", image.size)
+        image.paste(ink, ((image.width - ink.width) // 2, (image.height - ink.height) // 2))
     return image.resize((size, size), Image.Resampling.LANCZOS)
 
 
@@ -317,14 +296,13 @@ class DesktopStyles:
     def button(self, name, p):
         size = self.button_size(name)
         style = self.button_style(name)
-        primary = name == "compare"
+        primary = name in ("compare", "format_apply")
         quiet = name in ("clear", "cancel", "demo", "remember")
         base = p.primary if primary else None if quiet else p.panel
         edge = None if primary or quiet else p.panel_edge
         hover = p.primary_hover if primary else p.hover
-        images = [rounded_surface(size, fill, self.px(10), edge=line, bottom=bottom) for fill, line, bottom in (
-            (base, edge, p.primary_hover if primary else None),
-            (None, None, None), (hover, edge, None), (hover, edge, None), (base, p.accent, None),
+        images = [rounded_surface(size, fill, size[1] // 2, edge=line) for fill, line in (
+            (base, edge), (p.preview if primary else None, None), (hover, edge), (hover, edge), (base, p.accent),
         )]
         photos = [ImageTk.PhotoImage(image, master=self.root) for image in images]
         self.surfaces[p.dark, name] = (images, photos)
@@ -333,7 +311,8 @@ class DesktopStyles:
                                   ("focus", photos[4]), ("active", photos[3]), sticky="nswe")
         self.style.layout(style, [(element, {"sticky": "nswe", "children": [
             ("Button.label", {"sticky": "nswe"})]})])
-        self.style.configure(style, anchor="center", background=p.base, foreground="#ffffff" if primary else p.text,
+        self.style.configure(style, anchor="center", space=self.px(5), background=p.base,
+                             foreground="#ffffff" if primary else p.text,
                              font=(FONT, self.px(BODY if primary else DETAIL), "bold" if primary else "normal"))
         self.style.map(style, foreground=[("disabled", p.disabled)])
 
@@ -349,7 +328,6 @@ class DesktopStyles:
         style.configure(".", font=(FONT, self.px(BODY)), background=p.base, foreground=p.text, borderwidth=0)
         for name in BUTTONS:
             self.button(name, p)
-        self.style_checkbox(p)
         style.configure("Results.Treeview", background=p.sidebar, fieldbackground=p.sidebar, foreground=p.text,
                         rowheight=self.px(36), borderwidth=0, relief="flat", padding=0)
         style.layout("Results.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
@@ -369,21 +347,11 @@ class DesktopStyles:
                         lightcolor=p.panel, darkcolor=p.panel, padding=self.px(3), selectbackground=p.selected,
                         selectforeground=p.text)
         style.map("Path.TEntry", fieldbackground=[("readonly", p.panel)], foreground=[("readonly", p.text)])
-
-    def style_checkbox(self, p):
-        photos = [
-            ImageTk.PhotoImage(icon(name, color, self.px(16)), master=self.root)
-            for name, color in (("unchecked", p.muted), ("checked", p.accent), ("unchecked", p.disabled))
-        ]
-        self.surfaces[p.dark, "checkbox"] = photos
-        self.style.element_create("Filter.indicator", "image", photos[0],
-                                  ("selected", photos[1]), ("disabled", photos[2]))
-        self.style.layout("Filter.TCheckbutton", [("Checkbutton.focus", {"sticky": "nswe", "children": [
-            ("Filter.indicator", {"side": "left", "sticky": ""}),
-            ("Checkbutton.label", {"side": "left", "sticky": ""}),
-        ]})])
-        self.style.configure("Filter.TCheckbutton", background=p.sidebar, foreground=p.muted,
-                             font=(FONT, self.px(DETAIL)), focuscolor=p.accent)
+        style.configure("Filter.TEntry", fieldbackground=p.preview, foreground=p.text,
+                        bordercolor=p.panel_edge, lightcolor=p.preview, darkcolor=p.preview,
+                        font=(FONT, self.px(DETAIL)), padding=(self.px(9), self.px(7)),
+                        selectbackground=p.selected, selectforeground=p.text)
+        style.map("Filter.TEntry", bordercolor=[("focus", p.accent)])
 
     def use(self, palette):
         self.style.theme_use("night" if palette.dark else "day")
