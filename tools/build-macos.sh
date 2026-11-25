@@ -21,7 +21,7 @@ archive="$PWD/dist/screenshot-to-source-macos-$arch.zip"
 "$python_bin" -m PyInstaller --noconfirm --onedir --windowed --noupx \
   --target-arch "$arch" --name "Screenshot to Source" \
   --osx-bundle-identifier io.github.hami066.screenshot-to-source \
-  --icon "$build_root/icon.icns" --add-data demo:demo \
+  --icon "$build_root/icon.icns" --add-data "$PWD/demo:demo" \
   --collect-all tkinterdnd2 --collect-all pypdfium2_raw --collect-data pypdfium2 \
   --distpath "$stage" --workpath "$build_root/build" --specpath "$build_root" app.py
 
